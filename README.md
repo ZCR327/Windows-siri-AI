@@ -29,7 +29,7 @@ recording.</sub>
 | **Local commands** | Time / date / volume / mute / search / open-app are answered locally without touching the model |
 | **Three-language layering** | UI language, reply language and dictation language are **independent** knobs (zh / en / bilingual) |
 | **Hot-reload config** | Edit `config.json` → the running assistant picks it up in ≤1 s. No restart |
-| **Graphical settings** | 31 knobs across 6 tabs, generated from a declarative spec, with live backend health checks |
+| **Graphical settings** | 44 knobs across 7 tabs, generated from a declarative spec, with live backend health checks |
 | **Quantitative self-tests** | The visual claims in this README are measured, not eyeballed — see [Verification](#verification) |
 
 ---
@@ -40,7 +40,8 @@ recording.</sub>
 
 ```powershell
 pip install -r requirements.txt
-copy config.example.json config.json      # Windows: Copy-Item config.example.json config.json
+# config.json is generated on first run - nothing to copy
+# copy config.example.json config.json    # Windows: Copy-Item config.example.json config.json
 ```
 
 Put your model key in (nothing is sent anywhere except your own provider):
@@ -48,6 +49,9 @@ Put your model key in (nothing is sent anywhere except your own provider):
 ```powershell
 python set_key.py --deepseek              # interactive, echoes nothing, verifies with a live call
 ```
+
+You can also type them straight into the settings panel (`settings.cmd`, Model tab) - the
+panel writes them to the key store only, and a blank field means keep the current key.
 
 Then run it:
 
@@ -195,7 +199,19 @@ install_autostart.py  per-user autostart via the Startup folder (no admin rights
 
 ![settings panel](docs/settings-en.png)
 
-31 knobs across 6 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
+44 knobs across 7 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
+
+What the panel can do now:
+
+- **Enter API keys** - three key fields on the Model tab. **Keys only ever reach the key
+  store**, never `config.json`.
+- **Switch backends off one by one** - a disabled backend is **never even built**, so not a
+  single request goes out to it.
+- **Toggle autostart and the tray icon** - on the System tab. Autostart drops a shortcut
+  into the Startup folder (per user, no admin rights needed).
+- **Reset to recommended** - one button puts every knob back to its recommended value
+  (**the key store is left alone**).
+- **Zero-config first run** - clone it, run it, and `config.json` is created for you.
 
 ### Design notes worth stealing
 
@@ -239,7 +255,7 @@ only one language is spoken; the other stays on the card.
 
 ## Configuration
 
-All 31 knobs live in `config.json` and are edited either by hand or through the settings
+All 44 knobs live in `config.json` and are edited either by hand or through the settings
 window. Highlights:
 
 | key | default | meaning |
@@ -257,9 +273,16 @@ window. Highlights:
 | `level_source` | `mic` | `mic` or `sim` (synthetic syllable envelope, for demoing without a mic) |
 | `ui_lang` / `reply_lang` | `zh` / `zh` | see above |
 | `llm.order` | `minimax, deepseek, zhipu` | backend priority |
+| `llm.enabled.*` | all `true` | per-backend switches; a disabled backend is never built |
+| `glow_intensity` | `1.0` | upper bound on the glow brightness (lower = subtler) |
+| `caption_font_size` | `14` | font size of the caption card body text |
+| `show_tray_icon` | `true` | tray icon (off means no settings entry point) |
+| `autostart` | `true` | start at login (per user, no admin rights needed) |
 
 **API keys never live in `config.json`.** They go in `config/api_keys.json`, which is
 git-ignored, and can be pointed elsewhere with the `SIRI_OS_KEYS` environment variable.
+The Model tab of the settings panel has three key fields for this; filling one writes it
+to the key store only, and leaving it blank keeps the current key.
 
 ```json
 { "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret" }

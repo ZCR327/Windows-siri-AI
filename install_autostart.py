@@ -37,6 +37,11 @@ def shortcut_path():
     return os.path.join(startup_dir(), SHORTCUT_NAME)
 
 
+def is_installed():
+    """开机自启快捷方式在不在（设置面板拿它显示真实状态）。"""
+    return os.path.exists(shortcut_path())
+
+
 def install():
     d = startup_dir()
     if not os.path.isdir(d):

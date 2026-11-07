@@ -19,6 +19,8 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
@@ -28,6 +30,11 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 import cfgstore
 import i18n
+
+try:
+    import keys as keylib
+except Exception:      # pragma: no cover
+    keylib = None
 
 QSS = """
 QWidget { background:#141419; color:#E8E9F0; font-family:'Microsoft YaHei UI'; font-size:13px; }
@@ -56,7 +63,7 @@ QCheckBox { color:#E8E9F0; spacing:8px; }
 QCheckBox::indicator { width:16px; height:16px; border-radius:4px;
                        border:1px solid #3A3B47; background:#1B1C23; }
 QCheckBox::indicator:hover { border-color:#7C8CFF; }
-QCheckBox::indicator:checked { background:#4C5BD4; border-color:#6B79E0; }
+QCheckBox::indicator:checked { background:#4C5BD4; border-color:#6B79E0; image: url("__CHECK_ICON__"); }
 QListWidget { background:#1B1C23; border:1px solid #2E2F3A; border-radius:6px; outline:0; }
 QListWidget::item { padding:5px 8px; border-radius:4px; }
 QListWidget::item:selected { background:#2E3A78; }
@@ -65,6 +72,37 @@ QScrollBar:vertical { background:#141419; width:10px; margin:0; }
 QScrollBar::handle:vertical { background:#33343F; border-radius:5px; min-height:30px; }
 QScrollBar::add-line, QScrollBar::sub-line { height:0; }
 """
+
+
+def _check_icon_path():
+    """画一张 16x16 的白色对勾 PNG，给复选框用。
+
+    QSS 画不出字形 —— 没有这个的话，勾选状态只是一块蓝色方块，
+    别人根本分不清是「开」还是「关」。放临时目录，进程内缓存。
+    """
+    try:
+        p = os.path.join(tempfile.gettempdir(), "siri_os_check.png")
+        if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < 86400:
+            return p
+        img = QtGui.QImage(16, 16, QtGui.QImage.Format_ARGB32)
+        img.fill(QtCore.Qt.transparent)
+        pnt = QtGui.QPainter(img)
+        pnt.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 240))
+        pen.setWidth(2)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        pen.setJoinStyle(QtCore.Qt.RoundJoin)
+        pnt.setPen(pen)
+        path = QtGui.QPainterPath()
+        path.moveTo(3.5, 8.2)
+        path.lineTo(6.6, 11.6)
+        path.lineTo(12.4, 4.6)
+        pnt.drawPath(path)
+        pnt.end()
+        img.save(p, "PNG")
+        return p
+    except Exception:
+        return ""
 
 
 class OrderEditor(QtWidgets.QWidget):
@@ -294,7 +332,9 @@ class SettingsDialog(QtWidgets.QDialog):
         outer.addWidget(self._central)
 
         self._build()
-        self.setStyleSheet(QSS)
+        icon = _check_icon_path()
+        icon_css = ('image: url("%s");' % icon.replace(chr(92), "/")) if icon else ""
+        self.setStyleSheet(QSS.replace('image: url("__CHECK_ICON__");', icon_css))
         self._status_timer = QtCore.QTimer(self)
         self._status_timer.timeout.connect(self._refresh_resident)
         self._status_timer.start(2000)
@@ -412,6 +452,16 @@ class SettingsDialog(QtWidgets.QDialog):
         scroll.setWidget(inner)
         return scroll
 
+    def _secret_len(self, spec):
+        """密钥库里已存的 key 长度 —— **只用来做占位提示，不显示内容**。"""
+        name = spec.get("secret_name") or spec["key"].split(".")[-1]
+        try:
+            if keylib is None:
+                return 0
+            return int(keylib.summary().get(name, 0))
+        except Exception:
+            return 0
+
     def _make_row(self, spec):
         w = QtWidgets.QWidget()
         lay = QtWidgets.QVBoxLayout(w)
@@ -432,6 +482,14 @@ class SettingsDialog(QtWidgets.QDialog):
 
         t = spec["type"]
         cur = cfgstore.get_path(self.cfg, spec["key"])
+        if spec["key"] == "autostart":
+            # 开机自启显示**真实状态**（启动文件夹里那个快捷方式在不在），
+            # 不是配置文件里的历史值 —— 否则别人手动删了快捷方式面板还骗人
+            try:
+                import install_autostart as ia
+                cur = ia.is_installed()
+            except Exception:
+                pass
         if t in ("float", "int"):
             ctrl = NumberRow(spec, cur)
             ctrl.changed.connect(self._on_change)
@@ -441,6 +499,11 @@ class SettingsDialog(QtWidgets.QDialog):
             ctrl.stateChanged.connect(self._on_change)
         elif t == "text":
             ctrl = QtWidgets.QLineEdit(str(cur if cur is not None else ""))
+            ctrl.editingFinished.connect(self._on_change)
+        elif t == "secret":
+            ctrl = QtWidgets.QLineEdit()
+            ctrl.setEchoMode(QtWidgets.QLineEdit.Password)
+            ctrl.setPlaceholderText(self.T("settings.secret.have") % self._secret_len(spec))
             ctrl.editingFinished.connect(self._on_change)
         elif t == "textlong":
             ctrl = QtWidgets.QPlainTextEdit(str(cur if cur is not None else ""))
@@ -511,7 +574,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def _on_ui_lang_changed(self, _val):
         """界面语言变了：先存盘，再整块重建界面。"""
         try:
-            cfg = self._collect()
+            cfg, _secrets = self._collect()
             cfgstore.save(cfg)
             self.cfg = cfg
         except Exception:
@@ -531,7 +594,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self._refresh_resident()
 
     def _collect(self):
+        """收集所有控件的值，返回 (cfg, secrets)。
+
+        - cfg 写进 config.json
+        - secrets 是这次**新填的**密钥（留空 = 不改），单独写进密钥库。
+          ⚠️ 密钥永远不进 config.json —— config.json 是要进版本库的东西。
+        """
         cfg = json.loads(json.dumps(self.cfg))
+        secrets = {}
         for spec, ctrl in self.rows:
             t = spec["type"]
             if t in ("float", "int"):
@@ -549,10 +619,15 @@ class SettingsDialog(QtWidgets.QDialog):
                     val = ctrl.currentText().strip()
             elif t == "order":
                 val = ctrl.value()
+            elif t == "secret":
+                raw = ctrl.text().strip()
+                if raw:
+                    secrets[spec.get("secret_name") or spec["key"].split(".")[-1]] = raw
+                continue
             else:
                 continue
             cfgstore.set_path(cfg, spec["key"], val)
-        return cfg
+        return cfg, secrets
 
     def _set_status(self, msg):
         self._status_msg = msg
@@ -563,10 +638,29 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def _do_save(self):
         try:
-            cfg = self._collect()
+            cfg, secrets = self._collect()
             cfgstore.save(cfg)
             self.cfg = cfg
-            self._set_status(self.T("settings.saved"))
+            # 密钥单独写进密钥库（永远不进 config.json）
+            saved = []
+            for name, val in secrets.items():
+                if keylib is None:
+                    raise RuntimeError("keys module unavailable")
+                keylib.set_key(name, val)
+                saved.append(name)
+            if saved:
+                for spec, ctrl in self.rows:
+                    if spec["type"] != "secret":
+                        continue
+                    nm = spec.get("secret_name") or spec["key"].split(".")[-1]
+                    if nm in saved:
+                        ctrl.clear()
+                        ctrl.setPlaceholderText(self.T("settings.secret.have") % self._secret_len(spec))
+                self._set_status(self.T("settings.secret.saved") % ", ".join(saved))
+                self._backend_check()          # 存完立刻验活
+            else:
+                self._set_status(self.T("settings.saved"))
+            self._apply_autostart(cfg)
         except Exception as e:
             self._set_status(self.T("settings.save_failed") % e)
 
@@ -588,10 +682,33 @@ class SettingsDialog(QtWidgets.QDialog):
             elif t == "order":
                 ctrl.list.clear()
                 ctrl.list.addItems(d or spec.get("items", []))
+            elif t == "secret":
+                ctrl.clear()                   # 只清输入框，不动密钥库里已存的 key
+                ctrl.setPlaceholderText(self.T("settings.secret.have") % self._secret_len(spec))
         self._do_save()
         self._set_status(self.T("settings.reset_done"))
         if self.lang() != before:
             QtCore.QTimer.singleShot(0, self._rebuild_for_lang)
+
+    def _apply_autostart(self, cfg):
+        """开机自启开关：按配置装/卸「启动」文件夹里的快捷方式。"""
+        want = bool(cfg.get("autostart", True))
+        try:
+            import install_autostart as ia
+            have = ia.is_installed()
+        except Exception:
+            return
+        if want == have:
+            return
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            cmd = [sys.executable, os.path.join(here, "install_autostart.py"),
+                   "install" if want else "remove"]
+            subprocess.run(cmd, cwd=here, capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self._set_status(self.T("settings.autostart.on" if want else "settings.autostart.off"))
+        except Exception as e:
+            self._set_status(self.T("settings.autostart.failed") % e)
 
     # ------------------------------------------------------------ 功能
     def _demo(self):

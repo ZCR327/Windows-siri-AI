@@ -55,16 +55,23 @@ DEFAULTS = {
     "orb_size": 200,
     "orb_bottom_margin": 92,
     "caption_max_width": 900,
+    "caption_font_size": 14,        # 字幕卡正文字号
     "caption_position": "top",
     "wave_delay_sec": 0.2,
     "wave_sweep_sec": 0.5,
     "wave_band_frac": 0.032,
     "glow_origin": [0.9236, 0.9711],
+    "glow_intensity": 1.0,          # 边光亮度上限（倍率，1.0 = 原始亮度）
+    "show_tray_icon": True,         # 托盘图标
+    "autostart": True,              # 开机自启
+    "sim_rate": 4.2,                # 模拟电平包络速率（level_source=sim 时用）
     # ---- 中英双语三层 ----
     "ui_lang": "zh",        # 界面语言：zh | en
     "reply_lang": "zh",     # 回复语言：zh | en | both（both = 中英对照）
     "llm": {
         "order": ["minimax", "deepseek", "zhipu"],
+        # 哪个后端参与请求（关掉就完全不碰它，一次请求都不发）
+        "enabled": {"minimax": True, "deepseek": True, "zhipu": True},
         "minimax_model": "MiniMax-M3.1-Flash",
         "minimax_api_key": "",
         "minimax_base_url": "https://api.minimaxi.com/v1",
@@ -122,6 +129,11 @@ SPEC = [
      "unit": "屏幕比例", "en_unit": "screen",
      "hint": "同上，纵向位置。",
      "en_hint": "Same as above, vertical position."},
+    {"key": "glow_intensity", "tab": "扩散", "label": "边光亮度", "en_label": "Glow brightness",
+     "type": "float", "min": 0.20, "max": 1.00, "step": 0.05, "decimals": 2,
+     "unit": "上限", "en_unit": "cap",
+     "hint": "边光的亮度上限。1.0 是原始亮度，调低可以让整体更含蓄。",
+     "en_hint": "Upper bound on the glow brightness. 1.0 is the original brightness; lower values make it subtler."},
 
     # ---------------- 跑马灯 / 画面
     {"key": "marquee_period_sec", "tab": "跑马灯", "label": "跑马灯一圈", "en_label": "Marquee lap",
@@ -145,6 +157,26 @@ SPEC = [
      "unit": "像素", "en_unit": "px",
      "hint": "字幕卡最多占多宽。",
      "en_hint": "How wide the caption card may get."},
+    {"key": "caption_font_size", "tab": "跑马灯", "label": "字幕字号", "en_label": "Caption font size",
+     "type": "int", "min": 10, "max": 28, "step": 1,
+     "unit": "像素", "en_unit": "px",
+     "hint": "字幕卡正文的字号。",
+     "en_hint": "Font size of the caption card body text."},
+    {"key": "orb_size", "tab": "跑马灯", "label": "光球大小", "en_label": "Orb size",
+     "type": "int", "min": 80, "max": 420, "step": 10,
+     "unit": "像素", "en_unit": "px",
+     "hint": "中心光球的直径（只有打开「显示中心光球」才有效）。",
+     "en_hint": "Diameter of the centre orb (only used when the centre orb is enabled)."},
+    {"key": "orb_bottom_margin", "tab": "跑马灯", "label": "光球离底距离", "en_label": "Orb bottom margin",
+     "type": "int", "min": 0, "max": 300, "step": 4,
+     "unit": "像素", "en_unit": "px",
+     "hint": "中心光球离屏幕底边多远。",
+     "en_hint": "How far the centre orb sits above the bottom edge."},
+    {"key": "sim_rate", "tab": "跑马灯", "label": "模拟语速", "en_label": "Simulated speech rate",
+     "type": "float", "min": 1.0, "max": 12.0, "step": 0.2, "decimals": 1,
+     "unit": "音节/秒", "en_unit": "syllables/s",
+     "hint": "电平来源选「模拟」时，造出来的音节包络跑多快。",
+     "en_hint": "How fast the simulated syllable envelope runs when the level source is simulated."},
     {"key": "show_orb", "tab": "跑马灯", "label": "显示中心光球", "en_label": "Show center orb",
      "type": "bool",
      "hint": "参考视频里没有中间那个光球，默认关。",
@@ -166,6 +198,30 @@ SPEC = [
      "type": "order", "items": ["minimax", "deepseek", "zhipu"],
      "hint": "从上到下依次尝试；鉴权/余额出错的会自动跳过本次会话。",
      "en_hint": "Tried top to bottom; backends with auth or balance errors are skipped for this session."},
+    {"key": "llm.enabled.minimax", "tab": "模型", "label": "启用 MiniMax", "en_label": "Enable MiniMax",
+     "type": "bool",
+     "hint": "关掉就完全不请求这个后端。",
+     "en_hint": "When off, this backend is never contacted."},
+    {"key": "llm.enabled.deepseek", "tab": "模型", "label": "启用 DeepSeek", "en_label": "Enable DeepSeek",
+     "type": "bool",
+     "hint": "关掉就完全不请求这个后端。",
+     "en_hint": "When off, this backend is never contacted."},
+    {"key": "llm.enabled.zhipu", "tab": "模型", "label": "启用 智谱GLM", "en_label": "Enable Zhipu GLM",
+     "type": "bool",
+     "hint": "关掉就完全不请求这个后端。",
+     "en_hint": "When off, this backend is never contacted."},
+    {"key": "api_key.minimax", "tab": "模型", "label": "MiniMax 接口密钥", "en_label": "MiniMax API key",
+     "type": "secret", "secret_name": "minimax",
+     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
+     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
+    {"key": "api_key.deepseek", "tab": "模型", "label": "DeepSeek 接口密钥", "en_label": "DeepSeek API key",
+     "type": "secret", "secret_name": "deepseek",
+     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
+     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
+    {"key": "api_key.zhipu", "tab": "模型", "label": "智谱 接口密钥", "en_label": "Zhipu API key",
+     "type": "secret", "secret_name": "zhipu",
+     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
+     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
     {"key": "llm.minimax_model", "tab": "模型", "label": "MiniMax 模型", "en_label": "MiniMax model",
      "type": "choice",
      "choices": ["MiniMax-M3.1-Flash", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-Text-01"],
@@ -250,15 +306,26 @@ SPEC = [
                       "en": {"auto": "Auto", "zh-CN": "Chinese", "en-US": "English"}},
      "hint": "自动 = 上次成功的语言优先，这次没听清就换另一种再试一次（麦克风崩溃时不重试）。",
      "en_hint": "Auto prefers the language that worked last and retries with the other one if nothing is heard (no retry when the mic crashes)."},
+
+    # ---------------- 系统
+    {"key": "autostart", "tab": "系统", "label": "开机自启", "en_label": "Start at login",
+     "type": "bool",
+     "hint": "在「启动」文件夹放一个快捷方式（当前用户级，不需要管理员权限）。改完点保存生效。",
+     "en_hint": "Drops a shortcut into the Startup folder (per user, no admin rights needed). Takes effect when you save."},
+    {"key": "show_tray_icon", "tab": "系统", "label": "显示托盘图标", "en_label": "Show tray icon",
+     "type": "bool",
+     "hint": "关掉就没有托盘图标了 —— 也就打不开设置、没法从托盘退出（停不掉的话用 install_autostart.py stop）。",
+     "en_hint": "With it off there is no tray icon, so you cannot open settings or quit from the tray (use install_autostart.py stop to stop it)."},
 ]
 
-TABS = ["扩散", "跑马灯", "模型", "语音", "键位", "语言"]
+TABS = ["扩散", "跑马灯", "模型", "语音", "键位", "系统", "语言"]
 TAB_EN = {
     "扩散": "Diffusion",
     "跑马灯": "Marquee",
     "模型": "Model",
     "语音": "Voice",
     "键位": "Keys",
+    "系统": "System",
     "语言": "Language",
 }
 
@@ -317,9 +384,18 @@ def merge(base, new):
 
 
 def load(path=None):
-    """读配置；坏文件不炸 —— 缺的值用 DEFAULTS 补齐。"""
+    """读配置；坏文件不炸 —— 缺的值用 DEFAULTS 补齐。
+
+    配置文件不存在时**自动落一份默认配置**：
+    别人 clone 下来直接跑就行，不用先手动 copy config.example.json。
+    """
     path = path or CONFIG_PATH
     cfg = merge(DEFAULTS, {})
+    if path == CONFIG_PATH and not os.path.exists(path):
+        try:
+            save(cfg, path)
+        except Exception:
+            pass
     try:
         with io.open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

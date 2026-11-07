@@ -8,6 +8,7 @@
   "orb_size": 200,
   "orb_bottom_margin": 92,
   "caption_max_width": 900,
+  "caption_font_size": 14,
   "caption_position": "top",
   "wave_delay_sec": 0.2,
   "wave_sweep_sec": 0.5,
@@ -16,6 +17,10 @@
     0.9236,
     0.9711
   ],
+  "glow_intensity": 1.0,
+  "show_tray_icon": true,
+  "autostart": true,
+  "sim_rate": 4.2,
   "ui_lang": "zh",
   "reply_lang": "zh",
   "llm": {
@@ -24,6 +29,11 @@
       "deepseek",
       "zhipu"
     ],
+    "enabled": {
+      "minimax": true,
+      "deepseek": true,
+      "zhipu": true
+    },
     "minimax_model": "MiniMax-M3.1-Flash",
     "minimax_api_key": "",
     "minimax_base_url": "https://api.minimaxi.com/v1",

@@ -25,7 +25,7 @@
 | **本地指令** | 时间 / 日期 / 音量 / 静音 / 搜索 / 打开程序 —— 本地直接答，不消耗模型 |
 | **三层语言** | 界面语言、回复语言、听写语言**互相独立**（中文 / 英文 / 中英对照） |
 | **配置热重载** | 改 `config.json` → 常驻助手 1 秒内自己生效，不用重启 |
-| **图形化设置** | 6 个页签 31 个旋钮，由声明式 SPEC 自动生成，带后端可用性自检 |
+| **图形化设置** | 7 个页签 44 个旋钮，由声明式 SPEC 自动生成，带后端可用性自检 |
 | **量化自检** | 这份 README 里所有视觉结论都是**量出来的**，不是肉眼看的 —— 见[自检](#自检) |
 
 ---
@@ -36,7 +36,8 @@
 
 ```powershell
 pip install -r requirements.txt
-copy config.example.json config.json
+# config.json 不用手动建 —— 第一次跑会自动生成一份默认配置
+# 想先看看默认长什么样：copy config.example.json config.json
 ```
 
 填模型 key（只发给你自己的服务商，不经过任何第三方）：
@@ -44,6 +45,8 @@ copy config.example.json config.json
 ```powershell
 python set_key.py --deepseek              # 交互式，终端不回显，写完立刻发一次真实请求验活
 ```
+
+也可以直接开设置面板（双击 `settings.cmd`），在「模型」页签里填 —— 密钥同样只进密钥库。
 
 跑起来：
 
@@ -179,7 +182,15 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 
 ![设置面板](docs/settings-en.png)
 
-6 个页签 31 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
+7 个页签 44 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
+
+面板里现在能直接做的事：
+
+- **填 API key**：模型页三个密钥框（留空 = 不改现有 key）。**密钥只写进密钥库**，永远不进 `config.json`。
+- **逐个开关后端**：`llm.enabled.*` 关掉的后端**根本不建**，一次请求都不会发出去。
+- **开机自启 / 托盘图标**：在「系统」页签里直接切；开机自启用启动文件夹快捷方式（当前用户级，不要管理员权限）。
+- **一键恢复**：底部「恢复推荐配置」把所有旋钮拉回推荐值（**不动密钥库里的 key**）。
+- **首次运行零配置**：clone 下来直接跑，第一次运行自动生成 `config.json`。
 
 ### 几个值得抄的设计
 
@@ -214,7 +225,7 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 
 ## 配置
 
-31 个旋钮全在 `config.json` 里，手改或用设置面板改都行。几个关键的：
+44 个旋钮全在 `config.json` 里，手改或用设置面板改都行。几个关键的：
 
 | 键 | 默认 | 含义 |
 |---|---|---|
@@ -231,9 +242,15 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 | `level_source` | `mic` | `mic` 或 `sim`（模拟音节包络，麦克风坏了也能演示） |
 | `ui_lang` / `reply_lang` | `zh` / `zh` | 见上 |
 | `llm.order` | `minimax, deepseek, zhipu` | 后端优先级 |
+| `llm.enabled.*` | 三个都是 `true` | 逐个开关后端；关掉的**根本不建**，一次请求都不发 |
+| `glow_intensity` | `1.0` | 边光亮度上限（调低更含蓄） |
+| `caption_font_size` | `14` | 字幕卡正文字号 |
+| `show_tray_icon` | `true` | 托盘图标（关掉就没有设置入口） |
+| `autostart` | `true` | 开机自启（当前用户级，不要管理员权限） |
 
 **API key 不进 `config.json`。** 统一放 `config/api_keys.json`（已 gitignore），
-也可以用环境变量 `SIRI_OS_KEYS` 指到别处。
+也可以用环境变量 `SIRI_OS_KEYS` 指到别处。设置面板的「模型」页签里有三个密钥输入框，
+直接在那儿填就行 —— 填完同样只进密钥库，留空表示不修改现有 key。
 
 ```json
 { "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret" }

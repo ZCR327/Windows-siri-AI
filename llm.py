@@ -240,10 +240,16 @@ class LLM(object):
         self._build((cfg or {}).get("llm") or {})
 
     def _build(self, lcfg):
-        """按配置顺序重建后端列表。"""
+        """按配置顺序重建后端列表。
+
+        llm.enabled 里关掉的后端**根本不建** —— 连一次请求都不会发出去。
+        """
         order = lcfg.get("order") or ["minimax", "deepseek", "zhipu"]
+        enabled = lcfg.get("enabled") or {}
         self.backends = []
         for name in order:
+            if not enabled.get(name, True):
+                continue
             if name == "minimax":
                 self.backends.append(MinimaxBackend(
                     model=lcfg.get("minimax_model"),
@@ -272,6 +278,12 @@ class LLM(object):
         for b in self.backends:
             if old.get(b.name) != (b.model, b.base_url):
                 self._broken.pop(b.name, None)
+
+        try:
+            print('[llm] backends -> %s'
+                  % (', '.join(b.name for b in self.backends) or '(none)'))
+        except Exception:
+            pass
 
     def chat(self, messages, system=None, max_tokens=1024, temperature=0.6):
         errs = []

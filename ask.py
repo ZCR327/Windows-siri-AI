@@ -41,18 +41,13 @@ def main():
         print('usage: python tools\siri_orb\ask.py "your question" [--speak] [--lang=zh|en|both]')
         return 1
     text = " ".join(args).strip()
-    cfg = {}
-    try:
-        with io.open(os.path.join(HERE, "config.json"), "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        pass
-    # 补齐缺省（config.json 里可能缺新加的键）
+    # ⚠ 走 cfgstore.load()：它会用 DEFAULTS 补齐缺键，
+    #   并且在 config.json 不存在时自动生成一份（别人 clone 下来直接能跑）
     try:
         import cfgstore
-        cfg = cfgstore.merge(cfgstore.DEFAULTS, cfg)
+        cfg = cfgstore.load()
     except Exception:
-        pass
+        cfg = {}
 
     rl = lang_override or i18n.reply_lang(cfg)
     if rl not in i18n.REPLY_LANGS:

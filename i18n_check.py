@@ -9,6 +9,7 @@ settings 之后跑一遍就知道有没有漏：
 退出码 0 = 全过；非 0 = 有 FAIL。
 """
 import io
+import json
 import os
 import sys
 
@@ -70,6 +71,147 @@ def _check_rebuild():
     return (counts == [n0] * 3) and (len(orphans) == 0)
 
 
+def _check_new_features():
+    """面板扩容（2026-11-07）带来的新能力，固化成回归断言。
+
+    覆盖四件事：
+      1) llm.enabled 关掉的后端**根本不建** —— 一次请求都不发出去；
+      2) 首次运行自动生成 config.json —— 别人 clone 下来直接能跑；
+      3) 密钥永远不进 config.json —— 只进密钥库；
+      4) 新旋钮有默认值，而且真的被渲染代码读走。
+    """
+    import shutil
+    import tempfile
+    import time as _time
+
+    # ---- 1. 后端过滤 ----
+    import llm as llm_mod
+    lcfg = {"order": ["minimax", "deepseek", "zhipu"],
+            "enabled": {"minimax": False, "deepseek": True, "zhipu": False}}
+    L = llm_mod.LLM({"llm": lcfg})
+    names = [b.name for b in L.backends]
+    ok("minimax" not in names, "关掉的 MiniMax 不建后端", "-> %s" % names)
+    ok("zhipu" not in names, "关掉的 智谱 不建后端", "-> %s" % names)
+    ok("deepseek" in names, "开着的 DeepSeek 还在", "-> %s" % names)
+    ok(len(names) == 1, "只剩 1 个后端", "-> %s" % names)
+
+    # ---- 2. 首次运行自动生成 config.json ----
+    tmpdir = tempfile.mkdtemp(prefix="siri_cfg_")
+    try:
+        old_path = cfgstore.CONFIG_PATH
+        fake = os.path.join(tmpdir, "config.json")
+        cfgstore.CONFIG_PATH = fake
+        ok(not os.path.exists(fake), "起始状态：没有 config.json")
+        cfgstore.load()
+        ok(os.path.exists(fake), "首次运行自动落了一份 config.json")
+        try:
+            with io.open(fake, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            ok(isinstance(data, dict), "自动生成的配置是 dict")
+            ok(data.get("ui_lang") in ("zh", "en"), "自动生成的配置带默认值 ui_lang",
+               "-> %r" % (data.get("ui_lang") if isinstance(data, dict) else None))
+        except Exception as e:
+            ok(False, "自动生成的 config.json 能解析", "-> %s" % e)
+    finally:
+        cfgstore.CONFIG_PATH = old_path
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # ---- 3. 密钥不进 config.json ----
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5 import QtCore, QtGui, QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    import settings as S
+    S.SettingsDialog._backend_check = lambda self: None
+    dlg = S.SettingsDialog()
+    try:
+        sec_rows = [(sp, c) for sp, c in dlg.rows if sp.get("type") == "secret"]
+        ok(len(sec_rows) == 3, "面板上有 3 个密钥输入框", "-> %d" % len(sec_rows))
+        for sp, ctrl in sec_rows:
+            ctrl.setText("SELFTESTKEY-123456")
+        cfg, secrets = dlg._collect()
+        ok(isinstance(secrets, dict), "_collect 返回 (cfg, secrets)")
+        ok(len(secrets) == 3, "三个密钥都收进了 secrets", "-> %d" % len(secrets))
+        ok(secrets.get("minimax") == "SELFTESTKEY-123456",
+           "密钥名对得上", "-> %r" % sorted(secrets))
+        for sp, _c in sec_rows:
+            ok(cfgstore.get_path(cfg, sp["key"]) is None,
+               "config 里没有密钥项: %s" % sp["key"])
+        blob = json.dumps(cfg, ensure_ascii=False)
+        ok("SELFTESTKEY" not in blob, "config 序列化后不含密钥明文")
+        for sp, ctrl in sec_rows:
+            ctrl.clear()
+    finally:
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+
+    # ---- 4. 新旋钮有默认值 ----
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "caption_font_size") == 14, "字幕字号默认 14")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "glow_intensity") == 1.0, "边光亮度默认 1.0")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "show_tray_icon") is True, "默认显示托盘图标")
+    ok("autostart" in cfgstore.DEFAULTS, "默认有开机自启项")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "sim_rate") == 4.2, "模拟语速默认 4.2")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "llm.enabled.minimax") is True, "默认 MiniMax 开")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "llm.enabled.deepseek") is True, "默认 DeepSeek 开")
+    ok(cfgstore.get_path(cfgstore.DEFAULTS, "llm.enabled.zhipu") is True, "默认 智谱 开")
+    ok("系统" in cfgstore.TABS, "有「系统」页签")
+    ok(cfgstore.TAB_EN.get("系统") == "System", "「系统」有英文页签名")
+
+    # ---- 5. 边光亮度真的乘进渲染 ----
+    try:
+        import numpy as _np
+        import siri_orb
+        ov = siri_orb.Overlay(dict(cfgstore.DEFAULTS))
+        ov.resize(1440, 900)
+        ov.state = "listening"
+        ov.press_time = None
+        try:
+            ov._cfg_mtime = os.path.getmtime(cfgstore.CONFIG_PATH)
+        except Exception:
+            pass
+        alphas = {}
+        for cap in (1.0, 0.5):
+            ov.cfg["glow_intensity"] = cap
+            ov.glow = 1.0
+            ov._cfg_checked = _time.time()
+            ov._trig_checked = _time.time()
+            ov._tick_body()
+            img = ov.glow_img
+            ok(img is not None, "glow_intensity=%.1f 渲染出了图" % cap)
+            if img is None:
+                continue
+            img = img.convertToFormat(QtGui.QImage.Format_RGBA8888)
+            ptr = img.bits()
+            ptr.setsize(img.byteCount())
+            arr = _np.frombuffer(ptr, dtype=_np.uint8).reshape(img.height(), img.width(), 4)
+            alphas[cap] = float(arr[..., 3].mean())
+        if 1.0 in alphas and 0.5 in alphas:
+            ratio = alphas[0.5] / max(1e-6, alphas[1.0])
+            ok(0.35 < ratio < 0.65, "边光亮度 0.5 -> 平均 alpha 约为一半",
+               "-> ratio=%.3f (1.0=%.2f, 0.5=%.2f)" % (ratio, alphas[1.0], alphas[0.5]))
+        else:
+            ok(False, "边光亮度对比有数据")
+    except Exception as e:
+        ok(False, "边光亮度真的乘进渲染", "-> %s" % e)
+
+    # ---- 6. 字幕字号真的进 QFont ----
+    try:
+        import siri_orb
+        ov = siri_orb.Overlay(dict(cfgstore.DEFAULTS))
+        ov.caption = "Hello, this is a test of the caption font size."
+        ov.state = "listening"
+        sizes = {}
+        for fs in (14, 24):
+            ov.cfg["caption_font_size"] = fs
+            g = ov.caption_geom()
+            sizes[fs] = g[-1].pointSize()
+        ok(sizes.get(14) == 14, "字幕字号 14 -> QFont 14", "-> %r" % sizes)
+        ok(sizes.get(24) == 24, "字幕字号 24 -> QFont 24", "-> %r" % sizes)
+    except Exception as e:
+        ok(False, "字幕字号真的进 QFont", "-> %s" % e)
+
+
 def main():
     sec("1. SPEC 字段完整性（每个旋钮都要有英文）")
     for spec in cfgstore.SPEC:
@@ -83,8 +225,21 @@ def main():
     sec("2. 每个旋钮都能在 DEFAULTS 里找到默认值")
     for spec in cfgstore.SPEC:
         key = spec["key"]
+        if spec.get("type") == "secret":
+            continue          # 密钥在独立密钥库里，本来就不该进 DEFAULTS
         v = cfgstore.get_path(cfgstore.DEFAULTS, key)
         ok(v is not None, "DEFAULTS 有 %s" % key, "-> %r" % (v,))
+
+    sec("2b. 密钥条目：只在密钥库，不进 DEFAULTS")
+    for spec in cfgstore.SPEC:
+        if spec.get("type") != "secret":
+            continue
+        key = spec["key"]
+        ok(bool(spec.get("secret_name")), "secret 条目有 secret_name: %s" % key)
+        ok(cfgstore.get_path(cfgstore.DEFAULTS, key) is None,
+           "DEFAULTS 里没有密钥项: %s" % key)
+    ok(not any(str(k).startswith("api_key") for k in cfgstore.DEFAULTS),
+       "DEFAULTS 顶层没有 api_key 键")
 
     sec("3. 页签名中英齐全")
     for tab in cfgstore.TABS:
@@ -190,6 +345,12 @@ def main():
         ok(_check_rebuild(), "重建后控件数不增长（没有新旧按钮叠在一起）")
     except Exception as e:
         ok(False, "重建回归检查跑起来了", "-> %s" % e)
+
+    sec("13. 面板扩容的新功能回归（后端过滤 / 首次运行 / 密钥隔离 / 新旋钮）")
+    try:
+        _check_new_features()
+    except Exception as e:
+        ok(False, "新功能回归检查跑起来了", "-> %s" % e)
 
     print("\n%d checks, %d FAIL" % (CHECKS[0], len(FAILS)))
     if FAILS:

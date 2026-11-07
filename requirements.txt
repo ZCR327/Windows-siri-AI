@@ -3,6 +3,7 @@
 
 Pillow
 PyQt5
+install_autostart
 numpy
 opencv-python
 pywin32

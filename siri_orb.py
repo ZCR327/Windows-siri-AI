@@ -654,8 +654,10 @@ class Overlay(QtWidgets.QWidget):
                 marquee_gain = min(1.0, max(0.0, (now - end) / 0.35))
 
         if self.glow > 0.012:
+            cap = float(self.cfg.get("glow_intensity", 1.0) or 1.0)
+            intensity = max(0.0, min(1.0, self.glow * cap))
             self.glow_img = _to_qimage(
-                self._gr.render(t, self.glow, st, wave, marquee_gain, self.level))
+                self._gr.render(t, intensity, st, wave, marquee_gain, self.level))
             if self.cfg.get("show_orb", False):
                 self.orb_img = _to_qimage(self._or.render(t, self.glow, st))
             else:
@@ -711,7 +713,8 @@ class Overlay(QtWidgets.QWidget):
         卡片窗口和覆盖层共用这一份算法 —— 别复制成两份，改一处忘一处。
         """
         pos = str(self.cfg.get("caption_position", "top")).lower()
-        f = QtGui.QFont("Microsoft YaHei UI", 14 if pos == "top" else 11)
+        fs = int(self.cfg.get("caption_font_size", 14) or 14)
+        f = QtGui.QFont("Microsoft YaHei UI", fs if pos == "top" else max(9, fs - 3))
         fm = QtGui.QFontMetrics(f)
         maxw = int(self.cfg.get("caption_max_width", 760))
         br = fm.boundingRect(QtCore.QRect(0, 0, maxw, 400),
@@ -1168,21 +1171,27 @@ def main():
             print("[siri_orb] cannot open settings: %s" % e)
 
     tray_lang = i18n.ui_lang(cfg)
-    tray = QtWidgets.QSystemTrayIcon(make_icon(), app)
-    menu = QtWidgets.QMenu()
-    act_test = menu.addAction(i18n.t(tray_lang, "tray.demo"))
-    act_test.triggered.connect(trigger)
-    act_set = menu.addAction(i18n.t(tray_lang, "tray.settings"))
-    act_set.triggered.connect(open_settings)
-    menu.addSeparator()
-    act_quit = menu.addAction(i18n.t(tray_lang, "tray.quit"))
-    act_quit.triggered.connect(app.quit)
-    tray.setContextMenu(menu)
-    tray.setToolTip(i18n.t(tray_lang, "tray.tooltip"))
-    tray.show()
+    tray = None
+    if cfg.get("show_tray_icon", True):
+        tray = QtWidgets.QSystemTrayIcon(make_icon(), app)
+        menu = QtWidgets.QMenu()
+        act_test = menu.addAction(i18n.t(tray_lang, "tray.demo"))
+        act_test.triggered.connect(trigger)
+        act_set = menu.addAction(i18n.t(tray_lang, "tray.settings"))
+        act_set.triggered.connect(open_settings)
+        menu.addSeparator()
+        act_quit = menu.addAction(i18n.t(tray_lang, "tray.quit"))
+        act_quit.triggered.connect(app.quit)
+        tray.setContextMenu(menu)
+        tray.setToolTip(i18n.t(tray_lang, "tray.tooltip"))
+        tray.show()
+    else:
+        print("[siri_orb] tray icon disabled by config -> no settings / quit entry")
 
     # 托盘是常驻的：改了「界面语言」要跟着改菜单文案，不能按启动时的语言定死
     def _sync_tray():
+        if tray is None:
+            return
         lang = i18n.ui_lang(overlay.cfg)
         if getattr(_sync_tray, "_lang", None) == lang:
             return
@@ -1193,10 +1202,11 @@ def main():
         tray.setToolTip(i18n.t(lang, "tray.tooltip"))
         print("[siri_orb] tray labels -> %s" % lang)
 
-    _sync_tray._lang = tray_lang
-    tray_timer = QtCore.QTimer()
-    tray_timer.timeout.connect(_sync_tray)
-    tray_timer.start(1000)
+    if tray is not None:
+        _sync_tray._lang = tray_lang
+        tray_timer = QtCore.QTimer()
+        tray_timer.timeout.connect(_sync_tray)
+        tray_timer.start(1000)
 
     sys.exit(app.exec_())
 
