@@ -1,0 +1,50 @@
+{
+  "hotkey": "ctrl+alt+space",
+  "xiaomi_scan_code": 114,
+  "xiaomi_vk": 255,
+  "swallow_matched_key": true,
+  "log_all_keys": true,
+  "show_orb": false,
+  "orb_size": 200,
+  "orb_bottom_margin": 92,
+  "caption_max_width": 900,
+  "caption_position": "top",
+  "wave_delay_sec": 0.2,
+  "wave_sweep_sec": 0.5,
+  "wave_band_frac": 0.032,
+  "glow_origin": [
+    0.9236,
+    0.9711
+  ],
+  "ui_lang": "zh",
+  "reply_lang": "zh",
+  "llm": {
+    "order": [
+      "minimax",
+      "deepseek",
+      "zhipu"
+    ],
+    "minimax_model": "MiniMax-M3.1-Flash",
+    "minimax_api_key": "",
+    "minimax_base_url": "https://api.minimaxi.com/v1",
+    "deepseek_model": "deepseek-chat",
+    "deepseek_api_key": "",
+    "deepseek_base_url": "https://api.deepseek.com",
+    "zhipu_model": "glm-4-flash",
+    "zhipu_api_key": "",
+    "zhipu_base_url": "https://open.bigmodel.cn/api/paas/v4"
+  },
+  "stt": {
+    "timeout_sec": 10,
+    "language": "auto"
+  },
+  "tts": {
+    "voice_hint": "Huihui",
+    "rate": 0
+  },
+  "system_prompt": "你是运行在用户电脑上的语音助手。用简短自然的口语回答，一到两句话，不要用 Markdown、不要列点、不要表情符号。",
+  "marquee_period_sec": 6.0,
+  "marquee_trail": 0.09,
+  "level_source": "mic",
+  "level_gain": 1.0
+}

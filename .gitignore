@@ -1,0 +1,35 @@
+# ---- build artifacts ----
+.siri-os-build
+
+# ---- secrets: never commit ----
+config/*
+!config/api_keys.example.json
+config.json
+*.key
+*.pem
+.env
+
+# ---- runtime output ----
+logs/
+tmp/
+*.log
+*.pid
+*.request
+
+# ---- captured frames / scratch images ----
+*.png
+!docs/*.png
+*.npy
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ---- editors / os ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
