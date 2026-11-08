@@ -349,7 +349,7 @@ def check_service():
         low = cmdline.lower()
         # 源码跑 = siri_orb.py；装好的打包版 = Siri-OS.exe —— 两种都算「常驻在跑」。
         # 只认 siri_orb.py 的话，跑了 exe 的机器会被误报成「服务没启动」。
-        # ⚠️ CIM 给的 cmdline **带引号**（"D:\Siri-OS\Siri-OS.exe"），
+        # ⚠️ CIM 给的 cmdline **带引号**（"<安装目录>\Siri-OS.exe"），
         #    所以要 strip 掉引号再比，否则永远匹配不上。
         bare = low.strip('"')
         if ("siri_orb.py" in cmdline and "--demo" not in cmdline) \
