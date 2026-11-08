@@ -205,7 +205,9 @@ DEFAULTS = {
     # stt.language: auto | zh-CN | en-US
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
     # stt.mode: winh = 走 Windows 自带语音输入（Win+H）；offline = 本机 System.Speech
-    "stt": {"timeout_sec": 10, "language": "auto", "mode": "winh"},
+    "stt": {"timeout_sec": 10, "language": "auto", "mode": "winh",
+            "hide_panel": True, "mute_start_sound": True, "mute_seconds": 1.8,
+            "hide_seconds": 3.0},
     "tts": {"voice_hint": "Huihui", "rate": 0},
     # ⚠️ 语言中性：只说「你是谁、怎么说话」，不说用哪种语言 ——
     #    语言规则由 i18n.LANG_RULES 按 reply_lang 追加，用户改这段也不会失效。
@@ -341,6 +343,14 @@ SPEC = [
                       "en": {"winh": "Win+H voice typing", "offline": "Offline dictation"}},
      "hint": "Win+H 用 Windows 自带的语音输入；本机离线听写走 System.Speech，不联网。",
      "en_hint": "Win+H uses the built-in Windows voice typing; offline dictation uses System.Speech locally."},
+    {"key": "stt.hide_panel", "tab": "语音", "label": "隐藏语音输入面板", "en_label": "Hide voice typing panel",
+     "type": "bool",
+     "hint": "Win+H 会弹出 Windows 自己的语音输入条/提示卡，这里把它自动藏起来（只藏这一小会儿，不影响听写本身，也不碰中文输入法候选窗）。",
+     "en_hint": "Win+H shows Windows' own voice typing bar/toast. This hides it automatically; dictation itself is unaffected."},
+    {"key": "stt.mute_start_sound", "tab": "语音", "label": "静音开始录音提示音", "en_label": "Mute start-of-recording sound",
+     "type": "bool",
+     "hint": "刚开始录音那声「叮」，按一次键的工夫内把语音输入自己那个音频会话的音量压掉再恢复（只压这一小会儿）。",
+     "en_hint": "Silences the beep when recording starts by briefly muting the voice typing audio session, then restoring it."},
     {"key": "tts.voice_hint", "tab": "语音", "label": "播报音色", "en_label": "Voice",
      "type": "choice", "choices": ["Huihui", "Kangkang", "Yunyang", "Xiaoxiao", "Zira", "David"],
      "editable": True,

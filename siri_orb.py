@@ -1165,7 +1165,19 @@ def _begin_winh(overlay, card):
         card.editor.setFocus()
         _trace("_begin_winh: force_foreground=%s, focus queued for Win+H" % ok)
         # 给 Windows 一点时间把焦点落实 —— 发早了焦点还在别的程序手里
+        stt_cfg = (overlay.cfg.get("stt") or {})
+        # 开始录音那声「叮」：提前把语音输入宿主那个音频会话压掉（只压这一小会儿）
+        # 注意：必须排在发 Win+H **之前** —— 提示音是 Windows 收到按键就播的
+        if stt_cfg.get("mute_start_sound", True):
+            winh_mod.mute_voice_start_sound(
+                float(stt_cfg.get("mute_seconds", 1.8) or 1.8),
+                on_change=lambda info: _trace("mute_voice_start_sound: " + info))
         QtCore.QTimer.singleShot(400, _send_winh)
+        # 语音输入面板 / 提示卡：Windows 自己的 UI，没有官方开关，只能自己藏
+        if stt_cfg.get("hide_panel", True):
+            winh_mod.suppress_voice_ui(
+                float(stt_cfg.get("hide_seconds", 3.0) or 3.0),
+                on_hide=lambda info: _trace("suppress_voice_ui: hid " + info))
         _trace("_begin_winh: Win+H singleShot armed")
 
 

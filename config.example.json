@@ -89,7 +89,11 @@
   "stt": {
     "timeout_sec": 10,
     "language": "auto",
-    "mode": "winh"
+    "mode": "winh",
+    "hide_panel": true,
+    "mute_start_sound": true,
+    "mute_seconds": 1.8,
+    "hide_seconds": 3.0
   },
   "tts": {
     "voice_hint": "Huihui",
