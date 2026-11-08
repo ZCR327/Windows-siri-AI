@@ -53,7 +53,7 @@ import json  # noqa: E402  (放在 load_cfg 之后只是为了让上面的顺序
 
 # ---------------------------------------------------------------- 1 依赖
 def check_deps():
-    say(INFO, "--- 1/7 python deps ---")
+    say(INFO, "--- 1/8 python deps ---")
     missing = []
     for label, mod in (("numpy", "numpy"), ("PIL", "PIL"), ("requests", "requests"),
                         ("PyQt5", "PyQt5"), ("win32com", "win32com.client"),
@@ -69,7 +69,7 @@ def check_deps():
 
 # ---------------------------------------------------------------- 2 配置
 def check_config(cfg):
-    say(INFO, "--- 2/7 config.json ---")
+    say(INFO, "--- 2/8 config.json ---")
     sc = cfg.get("xiaomi_scan_code")
     if isinstance(sc, int) and 0 < sc < 256:
         say(OK, "xiaomi_scan_code = 0x%02X (sc bound)" % sc)
@@ -105,7 +105,7 @@ def check_config(cfg):
 
 # ---------------------------------------------------------------- 3 渲染
 def check_render(cfg, make_sheet=True):
-    say(INFO, "--- 3/7 renderer self-test ---")
+    say(INFO, "--- 3/8 renderer self-test ---")
     try:
         import numpy as np
         from siri_orb import GlowRenderer
@@ -210,7 +210,7 @@ def build_sheet(gr, bw, delay, sweep):
 
 # ---------------------------------------------------------------- 4 音频设备
 def check_audio_devices():
-    say(INFO, "--- 4/7 audio devices (SAPI) ---")
+    say(INFO, "--- 4/8 audio devices (SAPI) ---")
     out = os.path.join(HERE, "tmp", "audio_probe.txt")
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -253,7 +253,7 @@ def check_audio_devices():
 
 # ---------------------------------------------------------------- 5 麦克风
 def check_mic():
-    say(INFO, "--- 5/7 microphone capture (3s) ---")
+    say(INFO, "--- 5/8 microphone capture (3s) ---")
     out = os.path.join(HERE, "tmp", "doctor_stt.txt")
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
            os.path.join(HERE, "listen.ps1"), "-OutFile", out, "-TimeoutSec", "3", "-Language", "zh-CN"]
@@ -281,7 +281,7 @@ def check_mic():
 
 # ---------------------------------------------------------------- 6 模型
 def check_llm(cfg):
-    say(INFO, "--- 6/7 LLM backends ---")
+    say(INFO, "--- 6/8 LLM backends ---")
     lcfg = cfg.get("llm") or {}
     try:
         from llm import MinimaxBackend, DeepSeekBackend, ZhipuBackend
@@ -325,7 +325,7 @@ def check_llm(cfg):
 
 # ---------------------------------------------------------------- 7 常驻
 def check_service():
-    say(INFO, "--- 7/7 resident service ---")
+    say(INFO, "--- 7/8 resident service ---")
     out = os.path.join(HERE, "tmp", "proc_probe.txt")
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -346,13 +346,64 @@ def check_service():
         if not l.startswith("PROC|"):
             continue
         _, pid, cmdline = l.split("|", 2)
-        if "siri_orb.py" in cmdline and "--demo" not in cmdline:
+        low = cmdline.lower()
+        # 源码跑 = siri_orb.py；装好的打包版 = Siri-OS.exe —— 两种都算「常驻在跑」。
+        # 只认 siri_orb.py 的话，跑了 exe 的机器会被误报成「服务没启动」。
+        if ("siri_orb.py" in cmdline and "--demo" not in cmdline) or low.endswith("siri-os.exe"):
             hit = (pid, cmdline)
             break
     if hit:
         say(OK, "siri_orb service running: pid=%s" % hit[0])
     else:
-        say(WARN, "siri_orb service NOT running (start: python tools\\siri_orb\\siri_orb.py)")
+        say(WARN, "siri_orb service NOT running "
+                  "(start the installed Siri-OS.exe, or: python tools\\siri_orb\\siri_orb.py)")
+
+
+# ---------------------------------------------------------------- 8 开机自启
+def check_autostart(cfg):
+    say(INFO, "--- 8/8 autostart + config path ---")
+    try:
+        import install_autostart as ia
+    except Exception as e:
+        say(WARN, "install_autostart unavailable: %r" % e)
+        return
+    p = ia.shortcut_path()
+    if not os.path.exists(p):
+        say(WARN, "autostart shortcut MISSING: %s" % p)
+        say(INFO, "  (enable it in the settings panel of the packaged exe)")
+        return
+    try:
+        import win32com.client
+        shell = win32com.client.Dispatch("WScript.Shell")
+        lnk = shell.CreateShortCut(p)
+        target = lnk.Targetpath or ""
+        args = lnk.Arguments or ""
+        wdir = lnk.WorkingDirectory or ""
+    except Exception as e:
+        say(WARN, "cannot read shortcut: %r" % e)
+        return
+    say(INFO, "  target : %s" % target)
+    say(INFO, "  args   : %s" % args)
+    say(INFO, "  wdir   : %s" % wdir)
+    if ia.FROZEN:
+        if target and os.path.normcase(target) == os.path.normcase(ia.EXE or ""):
+            say(OK, "autostart points at this exe")
+        else:
+            say(FAIL, "autostart does NOT point at this exe -> %s" % target)
+    else:
+        if ia.is_temp_workspace(target) or ia.is_temp_workspace(args):
+            say(FAIL, "autostart points into a TEMP session dir "
+                      "(reboot starts another build -> config looks reset)")
+        else:
+            say(OK, "autostart target is outside any session dir: %s" % target)
+    try:
+        import cfgstore
+        say(INFO, "  config : %s" % cfgstore.CONFIG_PATH)
+        if not ia.FROZEN:
+            say(INFO, "  (this build reads the config above; "
+                      "the installed exe reads the one next to it)")
+    except Exception:
+        pass
 
 
 def main():
@@ -371,6 +422,7 @@ def main():
         check_mic()
     check_llm(cfg)
     check_service()
+    check_autostart(cfg)
     return finish(t0)
 
 

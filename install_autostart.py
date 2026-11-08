@@ -25,6 +25,19 @@ FROZEN = bool(pathmod is not None and pathmod.is_frozen())
 EXE = pathmod.exe_path() if FROZEN else None
 
 
+# 会话工作区是**临时目录**（会话结束就没了）。
+# 指到那里的自启有两个问题：① 会话一结束快捷方式就指向不存在的文件；
+# ② 它启动的是**另一份程序、读另一份 config.json** ——
+#    表现就是「每次电脑重启后配置都被重置」（2026-11-08 本机真踩过）。
+_TEMP_HINTS = ("\\sessions\\", "/sessions/")
+
+
+def is_temp_workspace(path):
+    """这个路径是不是在会话临时目录里。"""
+    p = (path or "").lower().replace("/", "\\")
+    return any(h in p for h in _TEMP_HINTS)
+
+
 def startup_dir():
     appdata = os.environ.get("APPDATA")
     if not appdata:
@@ -67,6 +80,14 @@ def install():
         lnk.Arguments = ""
         lnk.WorkingDirectory = pathmod.data_dir()
     else:
+        if is_temp_workspace(HERE):
+            print("!! 这个路径在**会话临时目录**里：%s" % HERE)
+            print("   指过去的自启有两个毛病：")
+            print("   1) 会话结束路径就没了 -> 快捷方式指向不存在的文件；")
+            print("   2) 它启动的是**另一份程序、读另一份 config.json** ->")
+            print("      表现就是「每次电脑重启后配置都被重置」。")
+            print("   正确做法：在**打包好的 exe** 里打开设置面板，打开「开机自启」。")
+            return 2
         lnk.Targetpath = pythonw()
         lnk.Arguments = '"%s"' % SUPERVISOR
         lnk.WorkingDirectory = HERE
@@ -101,6 +122,10 @@ def status():
             print("  target    : %s" % lnk.Targetpath)
             print("  arguments : %s" % lnk.Arguments)
             print("  workdir   : %s" % lnk.WorkingDirectory)
+            if is_temp_workspace(lnk.Targetpath) or is_temp_workspace(lnk.Arguments):
+                print("  !! 指向会话临时目录 —— 重启后会启动另一份程序（配置看起来被重置）")
+            elif FROZEN and lnk.Targetpath and os.path.normcase(lnk.Targetpath) != os.path.normcase(EXE or ""):
+                print("  !! 指向的不是本 exe（%s）" % EXE)
         except Exception as e:
             print("  (cannot read: %s)" % e)
     pidf = os.path.join((pathmod.data_dir() if pathmod else HERE), "logs", "supervisor.pid")

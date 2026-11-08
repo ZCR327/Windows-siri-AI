@@ -1259,6 +1259,13 @@ def main():
         import settings as settings_mod
         sys.exit(settings_mod.main())
     _redirect_stdout_if_frozen()
+    # ⚠️ 启动第一件事：把「这次读的是哪份配置」写进日志。
+    #    「重启后配置被重置」这类问题的第一手证据就是这个路径：
+    #    源码模式读脚本目录、打包模式读 exe 同级目录 —— 指错了就是另一份文件，
+    #    看着像「配置被重置」，其实是两份配置在互相覆盖。
+    _trace("startup: config=%s exists=%s frozen=%s" % (
+        CONFIG_PATH, os.path.exists(CONFIG_PATH),
+        bool(getattr(sys, "frozen", False))))
     cfg = load_config()
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
