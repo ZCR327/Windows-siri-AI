@@ -29,7 +29,7 @@ recording.</sub>
 | **Local commands** | Time / date / volume / mute / search / open-app are answered locally without touching the model |
 | **Three-language layering** | UI language, reply language and dictation language are **independent** knobs (zh / en / bilingual) |
 | **Hot-reload config** | Edit `config.json` → the running assistant picks it up in ≤1 s. No restart |
-| **Graphical settings** | 44 knobs across 7 tabs, generated from a declarative spec, with live backend health checks |
+| **Graphical settings** | 64 knobs across 7 tabs, generated from a declarative spec, with live backend health checks |
 | **Quantitative self-tests** | The visual claims in this README are measured, not eyeballed — see [Verification](#verification) |
 
 ---
@@ -189,7 +189,8 @@ voice.py         offline dictation (SAPI) + TTS + local system commands (zh + en
 i18n.py          single source of truth for every user-visible string (zh / en)
 cfgstore.py      config layer: DEFAULTS + declarative SPEC + atomic read/write
 settings.py      graphical settings window (separate process, tray entry)
-llm.py           model backends: MiniMax (anthropic) / DeepSeek / Zhipu (OpenAI)
+providers.py      backend registry: 8 providers, 101 model ids, one row each
+llm.py           model backends: 8 providers over two protocols (anthropic / OpenAI)
 keys.py          API key store (never committed)
 startup.py       supervisor: relaunches the assistant if it dies
 install_autostart.py  per-user autostart via the Startup folder (no admin rights needed)
@@ -199,11 +200,11 @@ install_autostart.py  per-user autostart via the Startup folder (no admin rights
 
 ![settings panel](docs/settings-en.png)
 
-44 knobs across 7 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
+64 knobs across 7 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
 
 What the panel can do now:
 
-- **Enter API keys** - three key fields on the Model tab. **Keys only ever reach the key
+- **Enter API keys** - one key field per provider (eight in total) on the Model tab. Saving a key also switches that provider on. **Keys only ever reach the key
   store**, never `config.json`.
 - **Switch backends off one by one** - a disabled backend is **never even built**, so not a
   single request goes out to it.
@@ -213,8 +214,25 @@ What the panel can do now:
   (**the key store is left alone**).
 - **Zero-config first run** - clone it, run it, and `config.json` is created for you.
 - **Pick a model** - each backend's dropdown lists every model of that provider that
-  actually works (9 MiniMax / 5 DeepSeek / 16 Zhipu), you can still type a name that is
+  actually works (9 MiniMax / 5 DeepSeek / 16 Zhipu / 20 Claude / 13 Qwen / 12 Kimi / 15 Gemini / 11 Doubao), you can still type a name that is
   not in the list, and "Refresh" asks the provider's `/models` endpoint for the current set.
+
+### Eight providers, one registry
+
+`providers.py` holds one row per provider - protocol, endpoint, model list, key environment variable. The settings panel, the config layer and the request layer all read that same table, so adding a provider is a one-line change: the panel grows the controls, the config grows the defaults, the backend grows an entry.
+
+| provider | protocol | endpoint |
+|---|---|---|
+| MiniMax | anthropic `/messages` | `api.minimaxi.com/anthropic/v1` |
+| DeepSeek | OpenAI | `api.deepseek.com` |
+| Zhipu GLM | OpenAI | `open.bigmodel.cn/api/paas/v4` |
+| Claude | anthropic `/messages` | `api.anthropic.com/v1` |
+| Qwen | OpenAI | `dashscope.aliyuncs.com/compatible-mode/v1` |
+| Kimi | OpenAI | `api.moonshot.cn/v1` |
+| Gemini | OpenAI | `generativelanguage.googleapis.com/v1beta/openai` |
+| Doubao | OpenAI | `ark.cn-beijing.volces.com/api/v3` |
+
+`test_providers.py` proves the wiring without needing eight accounts: it runs every backend against a local mock server (asserting the request shape, the response parsing and the 401/402/400 handling), then probes each real endpoint with a fake key and expects an **auth error rather than a connection error** - which is what proves the URL and the protocol are right.
 
 ### Design notes worth stealing
 
@@ -275,9 +293,9 @@ window. Highlights:
 | `show_orb` | `false` | the centre light orb is **off** by default — the reference had no centre glow |
 | `level_source` | `mic` | `mic` or `sim` (synthetic syllable envelope, for demoing without a mic) |
 | `ui_lang` / `reply_lang` | `zh` / `zh` | see above |
-| `llm.order` | `minimax, deepseek, zhipu` | backend priority |
-| `llm.enabled.*` | all `true` | per-backend switches; a disabled backend is never built |
-| `llm.minimax_model` / `llm.deepseek_model` / `llm.zhipu_model` | see the dropdown | which model to use; the dropdown holds the full measured set and accepts a typed name |
+| `llm.order` | `minimax, deepseek, zhipu` | backend priority; all 8 providers can be reordered |
+| `llm.enabled.*` | 3 of 8 `true` | per-backend switches; a disabled backend is never built. The other five stay off until you add a key |
+| `llm.<provider>_model` | see the dropdown | which model to use; the dropdown holds the full set and accepts a typed name |
 | `glow_intensity` | `1.0` | upper bound on the glow brightness (lower = subtler) |
 | `caption_font_size` | `14` | font size of the caption card body text |
 | `show_tray_icon` | `true` | tray icon (off means no settings entry point) |
@@ -285,11 +303,11 @@ window. Highlights:
 
 **API keys never live in `config.json`.** They go in `config/api_keys.json`, which is
 git-ignored, and can be pointed elsewhere with the `SIRI_OS_KEYS` environment variable.
-The Model tab of the settings panel has three key fields for this; filling one writes it
+The Model tab of the settings panel has one key field per provider for this; filling one writes it
 to the key store only, and leaving it blank keeps the current key.
 
 ```json
-{ "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret" }
+{ "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret", "claude": "sk-ant-..." }
 ```
 
 Alternatively, point `MINIMAX_GATEWAY_CFG` at a yaml file holding a `minimax: apiKey:`
@@ -309,7 +327,8 @@ The visual claims above are measured. The repository ships the measurement tools
 | tool | what it measures |
 |---|---|
 | `doctor.py` | 7-stage self-check: deps → config → renderer → audio → mic → models → resident process |
-| `i18n_check.py` | 323 assertions: every string has both languages, prompts are language-neutral, panel rebuild leaves no orphan widgets |
+| `i18n_check.py` | 645 assertions: every string has both languages, prompts are language-neutral, panel rebuild leaves no orphan widgets, all 8 providers are wired up |
+| `test_providers.py` | 107 checks over all 8 backends: request shape, response parsing and error handling against a local mock, plus a live auth probe against each provider |
 | `preview.py` | offline render of the rim at chosen timestamps, on a synthetic background |
 | `palette_check.py` | spline values and sampled rim colours |
 | `trail_check.py` | brightness profile behind the wavefront — proves the trail is flat, not a long tail |

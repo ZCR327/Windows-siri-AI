@@ -24,6 +24,11 @@ try:
 except Exception:  # pragma: no cover
     keylib = None
 
+try:
+    import providers as prov
+except Exception:  # pragma: no cover
+    prov = None
+
 # 本机 MiniMax 网关配置（可选）：本机已经登录过时可以免填 key。
 # 依次尝试：环境变量 MINIMAX_GATEWAY_CFG -> ~/.minimax/config.yaml -> Windows 默认安装路径
 LOCAL_CFG_CANDIDATES = (
@@ -91,7 +96,7 @@ class MinimaxBackend(object):
         self._local = local
         self.api_key = (self._explicit or _store_key("minimax")
                         or local.get("apiKey") or os.environ.get("MINIMAX_API_KEY", ""))
-        self.base_url = (base_url or local.get("baseURL") or "https://api.minimaxi.com/v1").rstrip("/")
+        self.base_url = (base_url or local.get("baseURL") or "https://api.minimaxi.com/anthropic/v1").rstrip("/")
         self.model = model or DEFAULT_MINIMAX_MODEL
         self.timeout = timeout
 
@@ -126,7 +131,12 @@ class MinimaxBackend(object):
             raise RuntimeError("minimax request failed: %s" % e)
         if r.status_code < 400:
             return self._parse_anthropic(r.json())
-        # 回落到 OpenAI 兼容协议
+        # **只有 404 才回落**到 OpenAI 兼容协议。
+        # 401/402/400 是真实错误（余额不足、key 失效、模型名不对）——
+        # 回落一次只会把真正的错误盖掉：之前 402 被回落的 404 顶掉，
+        # 面板上就显示成「404 地址不对」，害我查错方向。
+        if r.status_code != 404:
+            raise RuntimeError("minimax http %s: %s" % (r.status_code, r.text[:200]))
         obody = {
             "model": self.model,
             "messages": ([{"role": "system", "content": system}] if system else []) + list(messages),
@@ -140,7 +150,8 @@ class MinimaxBackend(object):
         except Exception as e:
             raise RuntimeError("minimax fallback failed: %s" % e)
         if r2.status_code >= 400:
-            raise RuntimeError("minimax http %s: %s" % (r2.status_code, r2.text[:200]))
+            raise RuntimeError("minimax /messages 404; fallback http %s: %s"
+                               % (r2.status_code, r2.text[:200]))
         return self._parse_openai(r2.json())
 
     @staticmethod
@@ -161,6 +172,56 @@ class MinimaxBackend(object):
             raise RuntimeError("minimax empty choices")
         msg = choices[0].get("message") or {}
         return (msg.get("content") or "").strip()
+
+
+class ClaudeBackend(object):
+    """anthropic /messages 协议（Claude）。
+
+    和 MiniMax 是同一种协议实现，但**没有 OpenAI 回落** ——
+    Anthropic 官方没有 /chat/completions 端点，回落了也只会再失败一次。
+    """
+
+    name = "claude"
+
+    def __init__(self, name=None, model=None, api_key=None, base_url=None,
+                 timeout=120, env="ANTHROPIC_API_KEY"):
+        self.name = name or "claude"
+        self._explicit = (api_key or "").strip()
+        self._env = env
+        self.api_key = (self._explicit or _store_key(self.name)
+                        or os.environ.get(self._env, ""))
+        self.base_url = (base_url or "https://api.anthropic.com/v1").rstrip("/")
+        self.model = model or ""
+        self.timeout = timeout
+
+    def refresh(self):
+        self.api_key = (self._explicit or _store_key(self.name)
+                        or os.environ.get(self._env, ""))
+        return self.api_key
+
+    def available(self):
+        return bool(self.api_key)
+
+    def chat(self, messages, system=None, max_tokens=1024, temperature=0.6):
+        if not self.available():
+            raise RuntimeError("%s: no api key" % self.name)
+        headers = {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": self.api_key,
+        }
+        body = {"model": self.model, "max_tokens": max_tokens,
+                "messages": messages, "temperature": temperature}
+        if system:
+            body["system"] = system
+        try:
+            r = requests.post(self.base_url + "/messages", headers=headers, json=body,
+                              timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError("%s request failed: %s" % (self.name, e))
+        if r.status_code >= 400:
+            raise RuntimeError("%s http %s: %s" % (self.name, r.status_code, r.text[:200]))
+        return MinimaxBackend._parse_anthropic(r.json())
 
 
 class OpenAIBackend(object):
@@ -229,14 +290,30 @@ class ZhipuBackend(OpenAIBackend):
                                timeout=timeout, store_name="zhipu", env="ZHIPU_API_KEY")
 
 
-MODELS_URL = {
-    "minimax": "https://api.minimaxi.com/v1/models",
-    "deepseek": "https://api.deepseek.com/models",
-    "zhipu": "https://open.bigmodel.cn/api/paas/v4/models",
-}
+def _registry():
+    return (prov.PROVIDERS if prov is not None else {})
 
 
-def list_models(provider, api_key=None, timeout=20):
+MODELS_URL = dict((n, p.get("models_url")) for n, p in _registry().items()
+                  if p.get("models_url"))
+
+
+def _models_headers(provider, key):
+    """各家 /models 端点的鉴权头不一样：OpenAI 系用 Bearer、Anthropic 用 x-api-key、
+    Gemini 原生端点用 x-goog-api-key。**都带上 Bearer**，省得为一家写分支。
+    """
+    p = _registry().get(provider) or {}
+    style = p.get("models_auth") or ("x-api-key" if p.get("protocol") == "anthropic"
+                                    else "bearer")
+    h = {"authorization": "Bearer " + key, "content-type": "application/json"}
+    if style == "x-api-key":
+        h["x-api-key"] = key
+    elif style == "x-goog-api-key":
+        h["x-goog-api-key"] = key
+    return h
+
+
+def list_models(provider, api_key=None, timeout=20, url=None):
     """从服务商自己的 /models 端点拉一份当前可用的模型清单。
 
     返回 (models, error)：models 是模型 id 列表，失败时是空列表 + 原因。
@@ -244,7 +321,7 @@ def list_models(provider, api_key=None, timeout=20):
     """
     if requests is None:
         return [], "requests module missing"
-    url = MODELS_URL.get(provider)
+    url = url or _registry().get(provider, {}).get("models_url") or MODELS_URL.get(provider)
     if not url:
         return [], "unknown provider: %s" % provider
     key = api_key
@@ -255,7 +332,7 @@ def list_models(provider, api_key=None, timeout=20):
             key = None
     if not key:
         return [], "no api key for %s" % provider
-    headers = {"authorization": "Bearer " + key, "content-type": "application/json"}
+    headers = _models_headers(provider, key)
     try:
         r = requests.get(url, headers=headers, timeout=timeout)
     except Exception as e:
@@ -266,18 +343,50 @@ def list_models(provider, api_key=None, timeout=20):
         j = r.json()
     except Exception:
         return [], "bad json"
-    data = j.get("data") if isinstance(j, dict) else None
+    data = None
+    if isinstance(j, dict):
+        for keyname in ("data", "models"):
+            if isinstance(j.get(keyname), list):
+                data = j[keyname]
+                break
     if not isinstance(data, list):
         return [], "unexpected payload"
     out = []
     for it in data:
+        mid = None
         if isinstance(it, dict):
             mid = it.get("id") or it.get("name") or it.get("model")
-            if mid:
-                out.append(str(mid))
         elif it:
-            out.append(str(it))
+            mid = it
+        if mid:
+            mid = str(mid)
+            # Gemini 的原生清单里是 "models/gemini-xxx"，去掉前缀
+            if mid.startswith("models/"):
+                mid = mid[len("models/"):]
+            out.append(mid)
     return sorted(set(out)), ""
+
+
+def make_backend(name, lcfg=None):
+    """按注册表造一个后端实例。
+
+    助手和面板的「后端自检」都走这一条路 —— 两边算出来的后端一定一致，
+    不会出现「面板说能用、助手说不能用」。
+    """
+    p = _registry().get(name)
+    if not p:
+        return None
+    lcfg = lcfg or {}
+    model = lcfg.get("%s_model" % name) or p.get("default_model")
+    api_key = lcfg.get("%s_api_key" % name) or ""
+    base_url = lcfg.get("%s_base_url" % name) or p.get("base_url")
+    if name == "minimax":
+        return MinimaxBackend(model=model, api_key=api_key, base_url=base_url)
+    if p.get("protocol") == "anthropic":
+        return ClaudeBackend(name=name, model=model, api_key=api_key, base_url=base_url,
+                             env=p.get("env"))
+    return OpenAIBackend(name=name, model=model, api_key=api_key, base_url=base_url,
+                         store_name=name, env=p.get("env"))
 
 
 class LLM(object):
@@ -295,27 +404,25 @@ class LLM(object):
 
         llm.enabled 里关掉的后端**根本不建** —— 连一次请求都不会发出去。
         """
-        order = lcfg.get("order") or ["minimax", "deepseek", "zhipu"]
-        enabled = lcfg.get("enabled") or {}
+        registry = _registry()
+        # 用户排过的顺序在前；没排过的新厂商补在**后面**（不打乱已有顺序）
+        order = [n for n in (lcfg.get("order") or []) if n in registry]
+        for n in registry:
+            if n not in order:
+                order.append(n)
+        enabled = lcfg.get("enabled")
+        if not isinstance(enabled, dict):
+            enabled = {}
+        # enabled 里没写的厂商 = **默认关** —— 新加进来的厂商不该被自动拉起来
+        # （还没填 key，发出去也是白费）。
+        default_on = set(prov.DEFAULT_ENABLED) if prov is not None else set()
         self.backends = []
         for name in order:
-            if not enabled.get(name, True):
+            if not enabled.get(name, name in default_on):
                 continue
-            if name == "minimax":
-                self.backends.append(MinimaxBackend(
-                    model=lcfg.get("minimax_model"),
-                    api_key=lcfg.get("minimax_api_key"),
-                    base_url=lcfg.get("minimax_base_url")))
-            elif name == "deepseek":
-                self.backends.append(DeepSeekBackend(
-                    model=lcfg.get("deepseek_model"),
-                    api_key=lcfg.get("deepseek_api_key"),
-                    base_url=lcfg.get("deepseek_base_url")))
-            elif name == "zhipu":
-                self.backends.append(ZhipuBackend(
-                    model=lcfg.get("zhipu_model"),
-                    api_key=lcfg.get("zhipu_api_key"),
-                    base_url=lcfg.get("zhipu_base_url")))
+            b = make_backend(name, lcfg)
+            if b is not None:
+                self.backends.append(b)
 
     def apply_config(self, cfg):
         """配置热重载后调用 —— 模型/后端顺序改了**立刻生效**，不用重启助手。

@@ -106,22 +106,26 @@ def _check_icon_path():
 
 
 class OrderEditor(QtWidgets.QWidget):
-    """后端优先级：上下移动。"""
+    """后端优先级：上下移动。
+
+    列表里显示的是**厂商友好名**（MiniMax / 千问 / 智谱 GLM…），
+    存进 config.json 的是**厂商代号**（minimax / qwen / zhipu…）。
+    → 显示名放 text，原始值放 itemData，两边不能混。
+    """
 
     changed = QtCore.pyqtSignal()
 
-    def __init__(self, items, value, lang="zh", parent=None):
+    def __init__(self, items, value, lang="zh", items_i18n=None, parent=None):
         super(OrderEditor, self).__init__(parent)
         lay = QtWidgets.QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
+        self._lang = lang
+        self._i18n = items_i18n or {}
+        self._items = list(items or [])
         self.list = QtWidgets.QListWidget()
-        self.list.setMaximumHeight(122)
-        vals = [v for v in (value or []) if v]
-        for it in items:
-            if it not in vals:
-                vals.append(it)
-        self.list.addItems(vals)
+        self.list.setMaximumHeight(240)
+        self.set_values(value)
         lay.addWidget(self.list)
         row = QtWidgets.QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
@@ -150,9 +154,28 @@ class OrderEditor(QtWidgets.QWidget):
             self.list.setCurrentRow(i + 1)
             self.changed.emit()
 
-    def value(self):
-        return [self.list.item(i).text() for i in range(self.list.count())]
+    def _label(self, raw):
+        m = self._i18n.get(self._lang) or {}
+        return m.get(raw, raw)
 
+    def set_values(self, value):
+        """回填一串厂商代号 —— 显示名本地化，存回去的还是代号。"""
+        vals = [v for v in (value or []) if v]
+        for it in self._items:
+            if it not in vals:
+                vals.append(it)
+        self.list.clear()
+        for v in vals:
+            item = QtWidgets.QListWidgetItem(self._label(v))
+            item.setData(QtCore.Qt.UserRole, v)
+            self.list.addItem(item)
+
+    def value(self):
+        out = []
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            out.append(it.data(QtCore.Qt.UserRole) or it.text())
+        return out
 
 class NumberRow(QtWidgets.QWidget):
     """滑块 + 数值框（联动）。滑块位置是整数，值由 min + pos*step 算出来。"""
@@ -251,23 +274,19 @@ class BackendCheck(QtCore.QThread):
             self.done.emit({"_": (i18n.t(self.lang, "settings.import_error") % e, "bad")})
             return
         lcfg = self.cfg.get("llm") or {}
-        makers = [
-            ("minimax", lambda: llm.MinimaxBackend(
-                model=lcfg.get("minimax_model"),
-                api_key=lcfg.get("minimax_api_key"),
-                base_url=lcfg.get("minimax_base_url"))),
-            ("deepseek", lambda: llm.DeepSeekBackend(
-                model=lcfg.get("deepseek_model"),
-                api_key=lcfg.get("deepseek_api_key"),
-                base_url=lcfg.get("deepseek_base_url"))),
-            ("zhipu", lambda: llm.ZhipuBackend(
-                model=lcfg.get("zhipu_model"),
-                api_key=lcfg.get("zhipu_api_key"),
-                base_url=lcfg.get("zhipu_base_url"))),
-        ]
-        for name, mk in makers:
+        enabled = lcfg.get("enabled") or {}
+        order = [n for n in (lcfg.get("order") or [])]
+        for n in cfgstore.provider_order():
+            if n not in order:
+                order.append(n)
+        for name in order:
             try:
-                b = mk()
+                if not enabled.get(name, True):
+                    out[name] = (i18n.t(self.lang, "settings.backend.off"), "warn")
+                    continue
+                b = llm.make_backend(name, lcfg)
+                if b is None:
+                    continue
                 try:
                     b.refresh()
                 except Exception:
@@ -442,15 +461,60 @@ class SettingsDialog(QtWidgets.QDialog):
         lay = QtWidgets.QVBoxLayout(inner)
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(14)
-        for spec in cfgstore.SPEC:
-            if spec.get("tab") != tab:
-                continue
-            lay.addWidget(self._make_row(spec))
+        specs = [s for s in cfgstore.SPEC if s.get("tab") == tab]
         if tab == "模型":
+            self._fill_model_tab(lay, specs)
             lay.addWidget(self._make_backend_box())
+        else:
+            for spec in specs:
+                lay.addWidget(self._make_row(spec))
         lay.addStretch(1)
         scroll.setWidget(inner)
         return scroll
+
+    def _fill_model_tab(self, lay, specs):
+        """模型页：后端优先级在最上，每家厂商一个分组，系统提示词在最后。"""
+        flat = [s for s in specs if not s.get("provider")]
+        groups = {}
+        for s in specs:
+            if s.get("provider"):
+                groups.setdefault(s["provider"], []).append(s)
+        for s in flat:
+            if s["key"] == "llm.order":
+                lay.addWidget(self._make_row(s))
+        for name in cfgstore.provider_order():
+            rows = groups.get(name)
+            if rows:
+                lay.addWidget(self._make_provider_group(name, rows))
+        for s in flat:
+            if s["key"] != "llm.order":
+                lay.addWidget(self._make_row(s))
+
+    def _make_provider_group(self, name, rows):
+        """一家厂商一个分组框 —— 8 家摊平成 32 行根本没法看。"""
+        grp = QtWidgets.QGroupBox(cfgstore.provider_label(name, self.lang()))
+        gl = QtWidgets.QGridLayout(grp)
+        gl.setHorizontalSpacing(12)
+        gl.setVerticalSpacing(5)
+        gl.setContentsMargins(12, 8, 12, 10)
+        gl.setColumnStretch(1, 1)
+        r = 0
+        for spec in rows:
+            lab = QtWidgets.QLabel(self._spec_text(spec, "label", "en_label"))
+            lab.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            ctrl = self._make_control(spec)
+            self.rows.append((spec, ctrl))
+            gl.addWidget(lab, r, 0)
+            gl.addWidget(self._wrap_control(spec, ctrl), r, 1)
+            r += 1
+            hint = self._spec_text(spec, "hint", "en_hint")
+            if hint:
+                hl = QtWidgets.QLabel(hint)
+                hl.setObjectName("hint")
+                hl.setWordWrap(True)
+                gl.addWidget(hl, r, 0, 1, 2)
+                r += 1
+        return grp
 
     def _secret_len(self, spec):
         """密钥库里已存的 key 长度 —— **只用来做占位提示，不显示内容**。"""
@@ -480,6 +544,20 @@ class SettingsDialog(QtWidgets.QDialog):
             top.addWidget(u)
         lay.addLayout(top)
 
+        ctrl = self._make_control(spec)
+        self.rows.append((spec, ctrl))
+        lay.addWidget(self._wrap_control(spec, ctrl))
+
+        hint = self._spec_text(spec, "hint", "en_hint")
+        if hint:
+            hl = QtWidgets.QLabel(hint)
+            hl.setObjectName("hint")
+            hl.setWordWrap(True)
+            lay.addWidget(hl)
+        return w
+
+    def _make_control(self, spec):
+        """按 SPEC 造控件。抽出来是为了让「分组框」和「普通行」共用同一套。"""
         t = spec["type"]
         cur = cfgstore.get_path(self.cfg, spec["key"])
         if spec["key"] == "autostart":
@@ -525,33 +603,28 @@ class SettingsDialog(QtWidgets.QDialog):
             else:
                 ctrl.currentTextChanged.connect(self._on_change)
         elif t == "order":
-            ctrl = OrderEditor(spec.get("items", []), cur, self.lang())
+            ctrl = OrderEditor(spec.get("items", []), cur, self.lang(),
+                               spec.get("items_i18n"))
             ctrl.changed.connect(self._on_change)
         else:
             ctrl = QtWidgets.QLabel("-")
-        if spec.get("provider") and t == "choice":
-            # 模型下拉旁边挂一个「拉取最新」按钮 —— 新模型上线不用等发版
-            brow = QtWidgets.QHBoxLayout()
-            brow.setContentsMargins(0, 0, 0, 0)
-            brow.setSpacing(8)
-            brow.addWidget(ctrl, 1)
-            btn = QtWidgets.QPushButton(self.T("settings.models.refresh"))
-            btn.setToolTip(self.T("settings.models.refresh.tip"))
-            btn.clicked.connect(lambda _c=False, sp=spec, c=ctrl: self._refresh_models(sp, c))
-            brow.addWidget(btn)
-            lay.addLayout(brow)
-        else:
-            lay.addWidget(ctrl)
+        return ctrl
 
-        hint = self._spec_text(spec, "hint", "en_hint")
-        if hint:
-            hl = QtWidgets.QLabel(hint)
-            hl.setObjectName("hint")
-            hl.setWordWrap(True)
-            lay.addWidget(hl)
-
-        self.rows.append((spec, ctrl))
-        return w
+    def _wrap_control(self, spec, ctrl):
+        """模型下拉旁边挂一个「拉取最新」按钮 —— 新模型上线不用等发版。"""
+        if not (spec.get("provider") and spec["type"] == "choice"):
+            return ctrl
+        brow = QtWidgets.QHBoxLayout()
+        brow.setContentsMargins(0, 0, 0, 0)
+        brow.setSpacing(8)
+        brow.addWidget(ctrl, 1)
+        btn = QtWidgets.QPushButton(self.T("settings.models.refresh"))
+        btn.setToolTip(self.T("settings.models.refresh.tip"))
+        btn.clicked.connect(lambda _c=False, sp=spec, c=ctrl: self._refresh_models(sp, c))
+        brow.addWidget(btn)
+        box = QtWidgets.QWidget()
+        box.setLayout(brow)
+        return box
 
     def _set_choice(self, ctrl, spec, value):
         """下拉回填：本地化选项用 findData 定位，其余用 setCurrentText。"""
@@ -574,8 +647,9 @@ class SettingsDialog(QtWidgets.QDialog):
         grp = QtWidgets.QGroupBox(self.T("settings.backends.title"))
         gl = QtWidgets.QVBoxLayout(grp)
         gl.setSpacing(6)
-        for name in ("minimax", "deepseek", "zhipu"):
-            lab = QtWidgets.QLabel(self.T("settings.backends.checking") % name)
+        for name in cfgstore.provider_order():
+            disp = cfgstore.provider_label(name, self.lang())
+            lab = QtWidgets.QLabel(self.T("settings.backends.checking") % disp)
             lab.setObjectName("status")
             gl.addWidget(lab)
             self.backend_labels[name] = lab
@@ -710,6 +784,13 @@ class SettingsDialog(QtWidgets.QDialog):
                 keylib.set_key(name, val)
                 saved.append(name)
             if saved:
+                # 填了 key 就把该厂商**自动启用** —— 否则用户填完 key 还要再勾一次
+                # 「启用」，很容易以为没生效。
+                for name in saved:
+                    cfgstore.set_path(cfg, "llm.enabled.%s" % name, True)
+                    for sp2, c2 in self.rows:
+                        if sp2.get("key") == "llm.enabled.%s" % name and sp2.get("type") == "bool":
+                            c2.setChecked(True)
                 for spec, ctrl in self.rows:
                     if spec["type"] != "secret":
                         continue
@@ -717,10 +798,13 @@ class SettingsDialog(QtWidgets.QDialog):
                     if nm in saved:
                         ctrl.clear()
                         ctrl.setPlaceholderText(self.T("settings.secret.have") % self._secret_len(spec))
+                cfgstore.save(cfg)
+                self.cfg = cfg
                 self._set_status(self.T("settings.secret.saved") % ", ".join(saved))
                 self._backend_check()          # 存完立刻验活
             else:
                 self._set_status(self.T("settings.saved"))
+            self._apply_autostart(cfg)
             self._apply_autostart(cfg)
         except Exception as e:
             self._set_status(self.T("settings.save_failed") % e)
@@ -741,8 +825,7 @@ class SettingsDialog(QtWidgets.QDialog):
             elif t == "choice":
                 self._set_choice(ctrl, spec, d)
             elif t == "order":
-                ctrl.list.clear()
-                ctrl.list.addItems(d or spec.get("items", []))
+                ctrl.set_values(d or spec.get("items", []))
             elif t == "secret":
                 ctrl.clear()                   # 只清输入框，不动密钥库里已存的 key
                 ctrl.setPlaceholderText(self.T("settings.secret.have") % self._secret_len(spec))
@@ -812,8 +895,9 @@ class SettingsDialog(QtWidgets.QDialog):
             lab = self.backend_labels.get(name)
             if lab is None:
                 continue
-            lab.setText("%s: %s" % (name, txt) if self.lang() == "en"
-                        else "%s：%s" % (name, txt))
+            disp = cfgstore.provider_label(name, self.lang())
+            lab.setText("%s: %s" % (disp, txt) if self.lang() == "en"
+                        else "%s：%s" % (disp, txt))
             lab.setStyleSheet("color: %s; font-size:12px;" % colors.get(kind, "#9EA0AE"))
 
     def _refresh_resident(self):

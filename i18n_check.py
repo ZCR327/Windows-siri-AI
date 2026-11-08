@@ -125,12 +125,12 @@ def _check_new_features():
     dlg = S.SettingsDialog()
     try:
         sec_rows = [(sp, c) for sp, c in dlg.rows if sp.get("type") == "secret"]
-        ok(len(sec_rows) == 3, "面板上有 3 个密钥输入框", "-> %d" % len(sec_rows))
+        ok(len(sec_rows) == 8, "面板上有 8 个密钥输入框", "-> %d" % len(sec_rows))
         for sp, ctrl in sec_rows:
             ctrl.setText("SELFTESTKEY-123456")
         cfg, secrets = dlg._collect()
         ok(isinstance(secrets, dict), "_collect 返回 (cfg, secrets)")
-        ok(len(secrets) == 3, "三个密钥都收进了 secrets", "-> %d" % len(secrets))
+        ok(len(secrets) == 8, "八个密钥都收进了 secrets", "-> %d" % len(secrets))
         ok(secrets.get("minimax") == "SELFTESTKEY-123456",
            "密钥名对得上", "-> %r" % sorted(secrets))
         for sp, _c in sec_rows:
@@ -213,39 +213,48 @@ def _check_new_features():
 
 
 def _check_model_picker():
-    """模型下拉：清单要全、默认值要在清单里、面板上还得有「拉取最新」。
+    """模型选择器：8 家后端、清单全、下拉对得上、面板分组和友好名。
 
-    这三份清单是实测出来的（服务端 /models + 逐个真实请求验活），
-    所以这里断言的是「清单长度 + 面板渲染 + 默认值合法」，不是具体某几个名字。
+    有 key 的 3 家清单是**实测**的（服务端 /models + 逐个真实请求验活）；
+    其余 5 家抄官方文档 —— 面板 hint 里写明了这一点，不假装验过。
     """
     import llm as llm_mod
+    import providers as prov
+    names = list(prov.ORDER)
+    ok(len(names) == 8, "注册表里有 8 家后端", "-> %d" % len(names))
     ok(hasattr(cfgstore, "MODEL_CHOICES"), "cfgstore 有 MODEL_CHOICES")
-    ok(set(cfgstore.MODEL_CHOICES) == {"minimax", "deepseek", "zhipu"},
-       "三家服务商都有模型清单")
+    ok(set(cfgstore.MODEL_CHOICES) == set(names), "8 家服务商都有模型清单",
+       "-> %s" % sorted(cfgstore.MODEL_CHOICES))
     total = 0
-    for prov, lst in cfgstore.MODEL_CHOICES.items():
+    for p in names:
+        lst = cfgstore.MODEL_CHOICES[p]
         total += len(lst)
-        ok(len(lst) >= 5, "%s 模型数 >= 5" % prov, "-> %d" % len(lst))
-        ok(len(set(lst)) == len(lst), "%s 清单无重复" % prov)
+        ok(len(lst) >= 5, "%s 模型数 >= 5" % p, "-> %d" % len(lst))
+        ok(len(set(lst)) == len(lst), "%s 清单无重复" % p)
         ok(all(isinstance(m, str) and m.strip() for m in lst),
-           "%s 清单全是非空字符串" % prov)
-    ok(total >= 20, "三个后端加起来 >= 20 个模型", "-> %d" % total)
+           "%s 清单全是非空字符串" % p)
+        d = prov.PROVIDERS[p].get("default_model")
+        ok(d in lst, "%s 默认模型在清单里" % p, "-> %r" % d)
+        kinds = sorted([s["type"] for s in cfgstore.SPEC if s.get("provider") == p])
+        ok(kinds == ["bool", "choice", "secret", "text"],
+           "%s 有 启用/密钥/模型/地址 四个控件" % p, "-> %s" % kinds)
+    ok(total >= 90, "8 家加起来 >= 90 个模型", "-> %d" % total)
 
     for spec in cfgstore.SPEC:
-        prov = spec.get("provider")
-        if not prov:
+        pname = spec.get("provider")
+        if not pname or spec["type"] != "choice":
             continue
-        ok(spec["type"] == "choice", "%s 是下拉" % spec["key"])
-        ok(spec.get("choices") == cfgstore.MODEL_CHOICES.get(prov),
+        ok(spec.get("choices") == cfgstore.MODEL_CHOICES.get(pname),
            "%s 下拉内容 == 清单" % spec["key"])
         ok(spec.get("editable") is True, "%s 允许手输清单外的模型" % spec["key"])
         d = cfgstore.get_path(cfgstore.DEFAULTS, spec["key"])
-        ok(d in cfgstore.MODEL_CHOICES[prov], "%s 默认值在清单里" % spec["key"],
+        ok(d in cfgstore.MODEL_CHOICES[pname], "%s 默认值在清单里" % spec["key"],
            "-> %r" % d)
 
     ok(hasattr(llm_mod, "list_models"), "llm 有 list_models()")
-    ok(set(getattr(llm_mod, "MODELS_URL", {})) == {"minimax", "deepseek", "zhipu"},
-       "llm 三个 /models 地址都在")
+    ok(hasattr(llm_mod, "make_backend"), "llm 有 make_backend()")
+    ok(set(getattr(llm_mod, "MODELS_URL", {})) == set(names),
+       "llm 8 个 /models 地址都在")
     try:
         models, err = llm_mod.list_models("deepseek")
         if models:
@@ -255,7 +264,7 @@ def _check_model_picker():
     except Exception as e:
         ok(True, "list_models 调用异常（离线可跳过）", "-> %s" % e)
 
-    # 面板上：三个模型行都要有「拉取最新」按钮，且下拉里的项 == 清单
+    # 面板上：8 个模型下拉 + 8 个「拉取最新」按钮 + 8 个厂商分组 + 友好名优先级
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt5 import QtWidgets
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -265,23 +274,92 @@ def _check_model_picker():
     try:
         want = i18n.t("zh", "settings.models.refresh")
         nbtn = len([b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text() == want])
-        ok(nbtn == 3, "模型下拉旁有 3 个「拉取最新」按钮", "-> %d" % nbtn)
+        ok(nbtn == 8, "模型下拉旁有 8 个「拉取最新」按钮", "-> %d" % nbtn)
         combos = 0
         for spec, ctrl in dlg.rows:
-            prov = spec.get("provider")
-            if not prov:
+            pname = spec.get("provider")
+            if not pname or spec["type"] != "choice":
                 continue
             combos += 1
             got = [ctrl.itemText(i) for i in range(ctrl.count())]
-            ok(got == cfgstore.MODEL_CHOICES[prov],
+            ok(got == cfgstore.MODEL_CHOICES[pname],
                "%s 下拉里的项 == 清单" % spec["key"], "-> %d 项" % len(got))
-        ok(combos == 3, "面板上有 3 个模型下拉", "-> %d" % combos)
+        ok(combos == 8, "面板上有 8 个模型下拉", "-> %d" % combos)
+
+        titles = [g.title() for g in dlg.findChildren(QtWidgets.QGroupBox)]
+        for pname in names:
+            lab = cfgstore.provider_label(pname, "zh")
+            ok(lab in titles, "面板上有「%s」分组" % lab)
+
+        order_rows = [(sp, c) for sp, c in dlg.rows if sp.get("type") == "order"]
+        ok(len(order_rows) == 1, "有 1 个后端优先级控件")
+        if order_rows:
+            _sp, ctrl = order_rows[0]
+            texts = [ctrl.list.item(i).text() for i in range(ctrl.list.count())]
+            vals = ctrl.value()
+            ok(len(vals) == 8, "优先级列表有 8 项", "-> %d" % len(vals))
+            ok(set(vals) == set(names), "优先级存的是厂商代号", "-> %s" % vals)
+            ok(texts != vals, "优先级显示的不是代号")
+            for pname in names:
+                ok(cfgstore.provider_label(pname, "zh") in texts,
+                   "优先级里有 %s 的友好名" % pname)
     finally:
         try:
             dlg.hide()
         except Exception:
             pass
 
+
+def _check_auto_enable():
+    """填了某家厂商的 key -> 那一家的「启用」自动打开。
+
+    ⚠ 测试时把 config.json 指向临时目录、把密钥库写入换成空操作 ——
+       不能拿真密钥库做实验。
+    """
+    import shutil
+    import tempfile
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    import settings as S
+    import keys as keylib
+    S.SettingsDialog._backend_check = lambda self: None
+    dlg = S.SettingsDialog()
+    tmpdir = tempfile.mkdtemp(prefix="siri_cfg_")
+    old_path = cfgstore.CONFIG_PATH
+    old_set = keylib.set_key
+    try:
+        cfgstore.CONFIG_PATH = os.path.join(tmpdir, "config.json")
+        keylib.set_key = lambda n, v: None
+        rows = dict((sp["key"], c) for sp, c in dlg.rows if sp.get("type") == "secret")
+        ctrl = rows.get("api_key.claude")
+        ok(ctrl is not None, "面板上有 Claude 的密钥输入框")
+        if ctrl is None:
+            return
+        chk = None
+        for sp, c in dlg.rows:
+            if sp.get("key") == "llm.enabled.claude" and sp.get("type") == "bool":
+                chk = c
+        ok(chk is not None, "面板上有 Claude 的启用开关")
+        if chk is None:
+            return
+        ok(chk.isChecked() is False, "Claude 默认是关的")
+        ctrl.setText("SELFTEST-KEY-123456")
+        dlg._do_save()
+        ok(chk.isChecked() is True, "填了 key 之后「启用」自动打开")
+        cfg = cfgstore.load(cfgstore.CONFIG_PATH)
+        ok(cfgstore.get_path(cfg, "llm.enabled.claude") is True,
+           "config.json 里 Claude 也被启用了")
+        ok(cfgstore.get_path(cfg, "api_key.claude") is None,
+           "密钥没写进 config.json")
+    finally:
+        keylib.set_key = old_set
+        cfgstore.CONFIG_PATH = old_path
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        try:
+            dlg.hide()
+        except Exception:
+            pass
 
 def main():
     sec("1. SPEC 字段完整性（每个旋钮都要有英文）")
@@ -423,11 +501,18 @@ def main():
     except Exception as e:
         ok(False, "新功能回归检查跑起来了", "-> %s" % e)
 
-    sec("14. 模型选择器（清单 / 下拉 / 拉取最新）")
+    sec("14. 模型选择器（8 家后端 / 清单 / 下拉 / 分组 / 友好名）")
+    sec("14. 模型选择器（8 家后端 / 清单 / 下拉 / 分组 / 友好名）")
     try:
         _check_model_picker()
     except Exception as e:
         ok(False, "模型选择器回归检查跑起来了", "-> %s" % e)
+
+    sec("15. 填了 key 自动启用该厂商")
+    try:
+        _check_auto_enable()
+    except Exception as e:
+        ok(False, "自动启用回归检查跑起来了", "-> %s" % e)
 
     print("\n%d checks, %d FAIL" % (CHECKS[0], len(FAILS)))
     if FAILS:

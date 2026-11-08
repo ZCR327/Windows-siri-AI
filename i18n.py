@@ -87,6 +87,7 @@ STRINGS = {
     "settings.order.up": ("上移", "Move up"),
     "settings.order.down": ("下移", "Move down"),
     "settings.backend.no_key": ("未配置 key", "no key configured"),
+    "settings.backend.off": ("已关闭（不请求）", "off (not contacted)"),
     "settings.backend.balance": ("余额不足（402）· 去 platform.minimaxi.com 充值",
                                  "out of credit (402) · top up at platform.minimaxi.com"),
     "settings.backend.auth": ("key 无效（401/403）", "invalid key (401/403)"),

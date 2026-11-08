@@ -19,6 +19,11 @@ import json
 import os
 import tempfile
 
+try:
+    import providers as prov
+except Exception:      # pragma: no cover
+    prov = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_DIR = os.path.join(HERE, "logs")
@@ -41,6 +46,109 @@ def fire_trigger(text=None):
     with io.open(TRIGGER_FILE, "w", encoding="utf-8") as f:
         f.write(payload)
     return True
+
+
+def _registry():
+    """后端注册表（providers.py）；拿不到就退回空表。"""
+    if prov is not None:
+        return prov.PROVIDERS
+    return {}
+
+
+def _llm_defaults():
+    """llm 段的默认值 —— **按注册表自动生成**。
+
+    加一家新厂商只需要在 providers.py 里加一行，这里自动多出
+    model / base_url / api_key 三个默认值 + 一个 enabled 开关。
+    新装的默认只开 minimax / deepseek / zhipu —— 其余 5 家得自己填 key。
+    """
+    reg = _registry()
+    order = list(prov.ORDER) if prov is not None else []
+    enabled_on = set(prov.DEFAULT_ENABLED) if prov is not None else set()
+    out = {
+        "order": order,
+        # 哪个后端参与请求（关掉就完全不碰它，一次请求都不发）
+        "enabled": dict((n, (n in enabled_on)) for n in reg),
+    }
+    for n, p in reg.items():
+        out["%s_model" % n] = p.get("default_model", "")
+        out["%s_base_url" % n] = p.get("base_url", "")
+        out["%s_api_key" % n] = ""
+    return out
+
+
+def _provider_specs():
+    """按注册表给每家厂商生成 4 个控件：启用开关 / 密钥 / 模型下拉 / 接口地址。
+
+    加一家新厂商 = 在 providers.py 里加一行，这里自动多出四个控件。
+    """
+    out = []
+    for name, p in _registry().items():
+        pair = p.get("label") or (name, name)
+        zh = pair[0]
+        en = pair[1] if len(pair) > 1 else pair[0]
+        out.append({
+            "key": "llm.enabled.%s" % name, "tab": "模型",
+            "label": "启用 %s" % zh, "en_label": "Enable %s" % en,
+            "type": "bool", "provider": name,
+            "hint": "关掉就完全不请求这个后端。",
+            "en_hint": "When off, this backend is never contacted."})
+        out.append({
+            "key": "api_key.%s" % name, "tab": "模型",
+            "label": "%s 接口密钥" % zh, "en_label": "%s API key" % en,
+            "type": "secret", "secret_name": name, "provider": name,
+            "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
+            "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."})
+        # 说明文字结尾的句号要去掉 —— 后面还要接"；清单是……"，拼起来变成 "…keys.；the list was…" 读着别扭
+        note_zh = (p.get("note") or "").rstrip("。. ")
+        note_en = (p.get("note_en") or p.get("note") or "").rstrip(". ")
+        if p.get("verified"):
+            how = "清单是实测出来的（服务端 /models + 逐个真实请求验活）"
+            how_en = ("the list was measured (server /models plus a live call per model)")
+        else:
+            how = "清单抄自官方文档（本机没 key 没法验活），填上 key 后点「拉取最新」换成服务端真实清单"
+            how_en = ("the list comes from the official docs (no key here to verify it) - add a key"
+                      " and hit Refresh to pull the real list from the server")
+        out.append({
+            "key": "llm.%s_model" % name, "tab": "模型",
+            "label": "%s 模型" % zh, "en_label": "%s model" % en,
+            "type": "choice", "provider": name,
+            "choices": list(p.get("models") or []),
+            "editable": True,
+            "hint": "%s；%s。可以自己输入清单里没有的模型名。" % (note_zh, how),
+            "en_hint": "%s; %s. You can type a model name that is not in the list."
+                       % (note_en, how_en)})
+        out.append({
+            "key": "llm.%s_base_url" % name, "tab": "模型",
+            "label": "%s 地址" % zh, "en_label": "%s URL" % en,
+            "type": "text", "provider": name,
+            "hint": "接口地址。用自建网关或代理的话改这里。",
+            "en_hint": "The endpoint. Change it if you use a self-hosted gateway or proxy."})
+    return out
+
+
+def _provider_items():
+    """后端优先级下拉里的原始值（厂商代号）。"""
+    return list(prov.ORDER) if prov is not None else list(_registry().keys())
+
+
+def _provider_items_i18n():
+    """后端优先级的本地化显示名：{语言: {代号: 名字}}。"""
+    if prov is not None:
+        return prov.labels_i18n()
+    return {"zh": {}, "en": {}}
+
+
+def provider_order():
+    """厂商顺序 —— 面板分组、后端自检遍历都用它。"""
+    return _provider_items()
+
+
+def provider_label(name, lang="zh"):
+    """厂商的本地化显示名（面板上显示的是这个，不是代号）。"""
+    if prov is not None:
+        return prov.label_of(name, lang)
+    return name
 
 
 # ------------------------------------------------------------------ 默认值
@@ -68,20 +176,8 @@ DEFAULTS = {
     # ---- 中英双语三层 ----
     "ui_lang": "zh",        # 界面语言：zh | en
     "reply_lang": "zh",     # 回复语言：zh | en | both（both = 中英对照）
-    "llm": {
-        "order": ["minimax", "deepseek", "zhipu"],
-        # 哪个后端参与请求（关掉就完全不碰它，一次请求都不发）
-        "enabled": {"minimax": True, "deepseek": True, "zhipu": True},
-        "minimax_model": "MiniMax-M3.1-Flash",
-        "minimax_api_key": "",
-        "minimax_base_url": "https://api.minimaxi.com/v1",
-        "deepseek_model": "deepseek-chat",
-        "deepseek_api_key": "",
-        "deepseek_base_url": "https://api.deepseek.com",
-        "zhipu_model": "glm-4-flash",
-        "zhipu_api_key": "",
-        "zhipu_base_url": "https://open.bigmodel.cn/api/paas/v4",
-    },
+    # llm 段**按 providers.py 的注册表自动生成**（模型 / 地址 / 开关 / 优先级）
+    "llm": _llm_defaults(),
     # stt.language: auto | zh-CN | en-US
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
     "stt": {"timeout_sec": 10, "language": "auto"},
@@ -97,29 +193,10 @@ DEFAULTS = {
 }
 
 
-MODEL_CHOICES = {
-    # 这三份清单是**实测出来的**，不是抄文档：
-    #   1) 用本机密钥打三家 API 自己的 /models 端点，拿到官方在售列表；
-    #   2) 再逐个发真实请求验活，剔掉调不通的：
-    #      glm-4-alltools 只支持异步调用（本助手是同步链），
-    #      glm-z1 本账户无权限，deepseek-v3.2-exp 服务端已下线。
-    # 新模型上线后在面板里点「拉取最新」就能现场刷新，不用等发版。
-    "minimax": [
-        "MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed",
-        "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed",
-        "MiniMax-M2",
-    ],
-    "deepseek": [
-        "deepseek-v4-pro", "deepseek-flash", "deepseek-chat",
-        "deepseek-reasoner", "deepseek-coder",
-    ],
-    "zhipu": [
-        "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.3-flashx-legal",
-        "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-5",
-        "glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4-flash",
-        "glm-4-plus", "glm-4-air", "glm-4v-plus",
-    ],
-}
+# 模型清单 = 注册表里的 models（各家一份，见 providers.py）
+# 有 key 的 3 家是**实测**出来的（服务端 /models + 逐个真实请求验活）；
+# 其余 5 家抄官方文档 —— 填上 key 后点「拉取最新」就能换成服务端真实清单。
+MODEL_CHOICES = dict((n, list(p.get("models") or [])) for n, p in _registry().items())
 
 
 # ------------------------------------------------------------ 旋钮的数据描述
@@ -220,62 +297,13 @@ SPEC = [
 
     # ---------------- 模型
     {"key": "llm.order", "tab": "模型", "label": "后端优先级", "en_label": "Backend priority",
-     "type": "order", "items": ["minimax", "deepseek", "zhipu"],
+     "type": "order", "items": _provider_items(), "items_i18n": _provider_items_i18n(),
      "hint": "从上到下依次尝试；鉴权/余额出错的会自动跳过本次会话。",
      "en_hint": "Tried top to bottom; backends with auth or balance errors are skipped for this session."},
-    {"key": "llm.enabled.minimax", "tab": "模型", "label": "启用 MiniMax", "en_label": "Enable MiniMax",
-     "type": "bool",
-     "hint": "关掉就完全不请求这个后端。",
-     "en_hint": "When off, this backend is never contacted."},
-    {"key": "llm.enabled.deepseek", "tab": "模型", "label": "启用 DeepSeek", "en_label": "Enable DeepSeek",
-     "type": "bool",
-     "hint": "关掉就完全不请求这个后端。",
-     "en_hint": "When off, this backend is never contacted."},
-    {"key": "llm.enabled.zhipu", "tab": "模型", "label": "启用 智谱GLM", "en_label": "Enable Zhipu GLM",
-     "type": "bool",
-     "hint": "关掉就完全不请求这个后端。",
-     "en_hint": "When off, this backend is never contacted."},
-    {"key": "api_key.minimax", "tab": "模型", "label": "MiniMax 接口密钥", "en_label": "MiniMax API key",
-     "type": "secret", "secret_name": "minimax",
-     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
-     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
-    {"key": "api_key.deepseek", "tab": "模型", "label": "DeepSeek 接口密钥", "en_label": "DeepSeek API key",
-     "type": "secret", "secret_name": "deepseek",
-     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
-     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
-    {"key": "api_key.zhipu", "tab": "模型", "label": "智谱 接口密钥", "en_label": "Zhipu API key",
-     "type": "secret", "secret_name": "zhipu",
-     "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
-     "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
-    {"key": "llm.minimax_model", "tab": "模型", "label": "MiniMax 模型", "en_label": "MiniMax model",
-     "type": "choice", "provider": "minimax",
-     "choices": MODEL_CHOICES["minimax"],
-     "editable": True,
-     "hint": "国内站 api.minimaxi.com。清单是实测出来的（服务端 /models + 逐个验活）；可以自己输入清单里没有的模型名。",
-     "en_hint": "China site api.minimaxi.com. The list was measured (server /models plus a live call per model); you can still type a name that is not in it."},
-    {"key": "llm.deepseek_model", "tab": "模型", "label": "DeepSeek 模型", "en_label": "DeepSeek model",
-     "type": "choice", "provider": "deepseek",
-     "choices": MODEL_CHOICES["deepseek"], "editable": True,
-     "hint": "DeepSeek 的模型名。v4-pro / flash 是官方在售的，chat / reasoner / coder 是还能调通的旧别名。",
-     "en_hint": "DeepSeek model names. v4-pro and flash are the current ones; chat, reasoner and coder are older aliases that still work."},
-    {"key": "llm.zhipu_model", "tab": "模型", "label": "智谱 GLM 模型", "en_label": "Zhipu GLM model",
-     "type": "choice", "provider": "zhipu",
-     "choices": MODEL_CHOICES["zhipu"], "editable": True,
-     "hint": "智谱的模型名。5.x 是新一代，4.x 系列仍可用。",
-     "en_hint": "Zhipu model names. 5.x is the new generation; the 4.x series still works."},
     {"key": "system_prompt", "tab": "模型", "label": "系统提示词", "en_label": "System prompt",
      "type": "textlong",
      "hint": "它决定助手的说话风格。语言规则会按「回复语言」另外追加，不用自己写语言要求。",
      "en_hint": "It decides how the assistant talks. Language rules are appended separately per reply language, so you do not need to state a language here."},
-    {"key": "llm.minimax_base_url", "tab": "模型", "label": "MiniMax 地址", "en_label": "MiniMax URL",
-     "type": "text",
-     "hint": "中国站是 api.minimaxi.com；国际站是 api.minimax.io（key 不能混用）。",
-     "en_hint": "China site api.minimaxi.com; international api.minimax.io. Keys are not interchangeable."},
-    {"key": "llm.deepseek_base_url", "tab": "模型", "label": "DeepSeek 地址", "en_label": "DeepSeek URL",
-     "type": "text", "hint": "DeepSeek 的接口地址。", "en_hint": "The DeepSeek endpoint."},
-    {"key": "llm.zhipu_base_url", "tab": "模型", "label": "智谱地址", "en_label": "Zhipu URL",
-     "type": "text", "hint": "智谱的接口地址。", "en_hint": "The Zhipu endpoint."},
-
     # ---------------- 语音
     {"key": "stt.timeout_sec", "tab": "语音", "label": "听写超时", "en_label": "Recognition timeout",
      "type": "int", "min": 5, "max": 30, "step": 1,
@@ -343,7 +371,7 @@ SPEC = [
      "type": "bool",
      "hint": "关掉就没有托盘图标了 —— 也就打不开设置、没法从托盘退出（停不掉的话用 install_autostart.py stop）。",
      "en_hint": "With it off there is no tray icon, so you cannot open settings or quit from the tray (use install_autostart.py stop to stop it)."},
-]
+] + _provider_specs()
 
 TABS = ["扩散", "跑马灯", "模型", "语音", "键位", "系统", "语言"]
 TAB_EN = {

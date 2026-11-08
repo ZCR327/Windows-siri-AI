@@ -25,7 +25,7 @@
 | **本地指令** | 时间 / 日期 / 音量 / 静音 / 搜索 / 打开程序 —— 本地直接答，不消耗模型 |
 | **三层语言** | 界面语言、回复语言、听写语言**互相独立**（中文 / 英文 / 中英对照） |
 | **配置热重载** | 改 `config.json` → 常驻助手 1 秒内自己生效，不用重启 |
-| **图形化设置** | 7 个页签 44 个旋钮，由声明式 SPEC 自动生成，带后端可用性自检 |
+| **图形化设置** | 7 个页签 64 个旋钮，由声明式 SPEC 自动生成，带后端可用性自检 |
 | **量化自检** | 这份 README 里所有视觉结论都是**量出来的**，不是肉眼看的 —— 见[自检](#自检) |
 
 ---
@@ -172,7 +172,8 @@ voice.py         离线听写（SAPI）+ 播报 + 本地系统指令（中英两
 i18n.py          所有用户可见文案的唯一真源（中 / 英）
 cfgstore.py      配置层：DEFAULTS + 声明式 SPEC + 原子读写
 settings.py      图形化设置窗口（独立进程，托盘入口）
-llm.py           模型后端：MiniMax(anthropic) / DeepSeek / 智谱(OpenAI)
+providers.py      后端注册表：8 家厂商 / 101 个模型 id，一家一行
+llm.py           模型后端：8 家厂商，两种协议（anthropic / OpenAI 兼容）
 keys.py          API key 仓库（不进版本库）
 startup.py       守护进程：助手挂了自动重拉
 install_autostart.py  当前用户级开机自启（不需要管理员权限）
@@ -182,17 +183,38 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 
 ![设置面板](docs/settings-en.png)
 
-7 个页签 44 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
+7 个页签 64 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
 
 面板里现在能直接做的事：
 
-- **填 API key**：模型页三个密钥框（留空 = 不改现有 key）。**密钥只写进密钥库**，永远不进 `config.json`。
+- **填 API key**：模型页每家厂商一个密钥框（八个，留空 = 不改现有 key）；填完顺手把这一家**自动启用**。**密钥只写进密钥库**，永远不进 `config.json`。
 - **逐个开关后端**：`llm.enabled.*` 关掉的后端**根本不建**，一次请求都不会发出去。
 - **开机自启 / 托盘图标**：在「系统」页签里直接切；开机自启用启动文件夹快捷方式（当前用户级，不要管理员权限）。
 - **一键恢复**：底部「恢复推荐配置」把所有旋钮拉回推荐值（**不动密钥库里的 key**）。
 - **首次运行零配置**：clone 下来直接跑，第一次运行自动生成 `config.json`。
-- **选模型**：三个后端各自的下拉里列了该家**全部实测可用的模型**（MiniMax 9 个 / DeepSeek 5 个 / 智谱 16 个），
+- **选模型**：三个后端各自的下拉里列了该家**全部实测可用的模型**（MiniMax 9 / DeepSeek 5 / 智谱 16 / Claude 20 / 千问 13 / Kimi 12 / Gemini 15 / 豆包 11），
   可以手输清单外的模型名；旁边的「拉取最新」直接问服务商的 `/models` 端点现场刷新。
+
+### 八家后端，一张注册表
+
+`providers.py` 每家厂商一行 —— 协议、接口地址、模型清单、key 的环境变量。
+设置面板、配置层、请求层读的是**同一张表**，所以加一家厂商只改一行：
+面板自动多出控件、配置自动多出默认值、后端自动多一个实例。
+
+| 厂商 | 协议 | 接口地址 |
+|---|---|---|
+| MiniMax | anthropic `/messages` | `api.minimaxi.com/anthropic/v1` |
+| DeepSeek | OpenAI | `api.deepseek.com` |
+| 智谱 GLM | OpenAI | `open.bigmodel.cn/api/paas/v4` |
+| Claude | anthropic `/messages` | `api.anthropic.com/v1` |
+| 千问 | OpenAI | `dashscope.aliyuncs.com/compatible-mode/v1` |
+| Kimi | OpenAI | `api.moonshot.cn/v1` |
+| Gemini | OpenAI | `generativelanguage.googleapis.com/v1beta/openai` |
+| 豆包 | OpenAI | `ark.cn-beijing.volces.com/api/v3` |
+
+`test_providers.py` 不用八个账号也能证明接线对不对：先把每个后端打到本地 mock 服务器
+（验请求形状、响应解析、401/402/400 的处理），再拿**假 key** 打真实端点，
+期望回的是**鉴权错**而不是连不上 —— 这才是「地址和协议真的对」的证据。
 
 ### 几个值得抄的设计
 
@@ -243,20 +265,20 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 | `show_orb` | `false` | 中心光球**默认关** —— 参考视频里没有中心光晕 |
 | `level_source` | `mic` | `mic` 或 `sim`（模拟音节包络，麦克风坏了也能演示） |
 | `ui_lang` / `reply_lang` | `zh` / `zh` | 见上 |
-| `llm.order` | `minimax, deepseek, zhipu` | 后端优先级 |
-| `llm.enabled.*` | 三个都是 `true` | 逐个开关后端；关掉的**根本不建**，一次请求都不发 |
-| `llm.minimax_model` / `llm.deepseek_model` / `llm.zhipu_model` | 见下拉 | 选哪个模型；下拉是**实测可用的全集**，也能手输清单外的名字 |
+| `llm.order` | `minimax, deepseek, zhipu` | 后端优先级；8 家都能重排 |
+| `llm.enabled.*` | 八家里三家用 `true` | 逐个开关后端；关掉的**根本不建**，一次请求都不发。另外五家填了 key 才自动开 |
+| `llm.<厂商>_model` | 见下拉 | 选哪个模型；下拉是**该家模型的全集**，也能手输清单外的名字 |
 | `glow_intensity` | `1.0` | 边光亮度上限（调低更含蓄） |
 | `caption_font_size` | `14` | 字幕卡正文字号 |
 | `show_tray_icon` | `true` | 托盘图标（关掉就没有设置入口） |
 | `autostart` | `true` | 开机自启（当前用户级，不要管理员权限） |
 
 **API key 不进 `config.json`。** 统一放 `config/api_keys.json`（已 gitignore），
-也可以用环境变量 `SIRI_OS_KEYS` 指到别处。设置面板的「模型」页签里有三个密钥输入框，
+也可以用环境变量 `SIRI_OS_KEYS` 指到别处。设置面板的「模型」页签里有八个密钥输入框（每家厂商一个），
 直接在那儿填就行 —— 填完同样只进密钥库，留空表示不修改现有 key。
 
 ```json
-{ "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret" }
+{ "minimax": "sk-...", "deepseek": "sk-...", "zhipu": "id.secret", "claude": "sk-ant-..." }
 ```
 
 也可以把 `MINIMAX_GATEWAY_CFG` 指到一个带 `minimax: apiKey:` 的 yaml，MiniMax 后端会从那里取 key。
@@ -274,7 +296,8 @@ LLM 对象全进程共用，拉黑状态才能跨按键保留。
 | 工具 | 量什么 |
 |---|---|
 | `doctor.py` | 7 段自检：依赖 → 配置 → 渲染 → 音频 → 麦克风 → 模型 → 常驻进程 |
-| `i18n_check.py` | 323 项断言：文案双语齐全、提示词语言中性、面板重建不残留孤儿控件 |
+| `i18n_check.py` | 645 项断言：文案双语齐全、提示词语言中性、面板重建不残留孤儿控件、8 家后端都接对了 |
+| `test_providers.py` | 8 家后端 107 项检查：本地 mock 验请求形状/响应解析/错误处理，再拿假 key 打真实端点验鉴权 |
 | `preview.py` | 离线渲染边光（合成背景，不碰你的桌面） |
 | `palette_check.py` | 样条取值 + 边缘采样配色 |
 | `trail_check.py` | 波前背后的亮度剖面 —— 证明拖尾是平的，不是一条长尾 |
