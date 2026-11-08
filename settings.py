@@ -36,6 +36,11 @@ try:
 except Exception:      # pragma: no cover
     keylib = None
 
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
+
 QSS = """
 QWidget { background:#141419; color:#E8E9F0; font-family:'Microsoft YaHei UI'; font-size:13px; }
 QLabel#title { font-size:19px; font-weight:600; color:#FFFFFF; }
@@ -805,7 +810,6 @@ class SettingsDialog(QtWidgets.QDialog):
             else:
                 self._set_status(self.T("settings.saved"))
             self._apply_autostart(cfg)
-            self._apply_autostart(cfg)
         except Exception as e:
             self._set_status(self.T("settings.save_failed") % e)
 
@@ -845,11 +849,19 @@ class SettingsDialog(QtWidgets.QDialog):
         if want == have:
             return
         try:
-            here = os.path.dirname(os.path.abspath(__file__))
-            cmd = [sys.executable, os.path.join(here, "install_autostart.py"),
-                   "install" if want else "remove"]
-            subprocess.run(cmd, cwd=here, capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if pathmod is not None and pathmod.is_frozen():
+                # 打包后没有独立的 install_autostart.py 可执行 —— 直接在进程里调
+                import install_autostart as ia
+                if want:
+                    ia.install()
+                else:
+                    ia.remove()
+            else:
+                here = os.path.dirname(os.path.abspath(__file__))
+                cmd = [sys.executable, os.path.join(here, "install_autostart.py"),
+                       "install" if want else "remove"]
+                subprocess.run(cmd, cwd=here, capture_output=True,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self._set_status(self.T("settings.autostart.on" if want else "settings.autostart.off"))
         except Exception as e:
             self._set_status(self.T("settings.autostart.failed") % e)
@@ -867,6 +879,18 @@ class SettingsDialog(QtWidgets.QDialog):
             self._set_status(self.T("settings.demo.failed") % e)
 
     def _open_keys(self):
+        # 打包成 exe 之后没有控制台，set_key.py 的 getpass 读不到东西 ——
+        # 但**面板里的密钥输入框一样能用**（每家厂商一个，保存即写入密钥库）。
+        if pathmod is not None and pathmod.is_frozen():
+            try:
+                tab = self._tab_widgets.get("模型")
+                if tab is not None:
+                    self.tabs.setCurrentWidget(tab)
+                self._set_status(self.T("settings.keys.inpanel"))
+                return
+            except Exception as e:
+                self._set_status(self.T("settings.keys.failed") % e)
+                return
         script = os.path.join(HERE, "set_key.py")
         try:
             # ⚠️ 必须用带控制台的 python.exe：set_key.py 用 getpass 读 key，

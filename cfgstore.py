@@ -24,7 +24,13 @@ try:
 except Exception:      # pragma: no cover
     prov = None
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
+
+# 打包成 exe：配置和日志必须写在 **exe 同级目录**（解包目录是只读的，写不进去）
+HERE = (pathmod.data_dir() if pathmod else os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(HERE, "config.json")
 LOG_DIR = os.path.join(HERE, "logs")
 TRIGGER_FILE = os.path.join(LOG_DIR, "demo.request")
@@ -178,6 +184,24 @@ DEFAULTS = {
     "reply_lang": "zh",     # 回复语言：zh | en | both（both = 中英对照）
     # llm 段**按 providers.py 的注册表自动生成**（模型 / 地址 / 开关 / 优先级）
     "llm": _llm_defaults(),
+    # ---- 助理能力（操作权限）----
+    # 总开关默认关；鼠标键盘 / 执行命令风险最高，各自再要一道单独的开关。
+    # work_dir 为空 = 用「我的文档/Siri-OS」，文件类工具锁死在里面。
+    "agent": {
+        "enabled": False,
+        "work_dir": "",
+        "allow_screen": False,
+        "allow_shell": False,
+        "max_rounds": 6,
+    },
+    # ---- 上下文 ----
+    # 对话记忆只存在**内存里**（关掉程序就没了），不写文件、不进 config.json。
+    # 电脑状态是每次请求都附带的一小段摘要（前台窗口 / 窗口清单 / 分辨率 / 工作目录）。
+    "ctx": {
+        "enabled": True,
+        "history_turns": 6,
+        "sysinfo": True,
+    },
     # stt.language: auto | zh-CN | en-US
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
     "stt": {"timeout_sec": 10, "language": "auto"},
@@ -362,6 +386,52 @@ SPEC = [
      "hint": "自动 = 上次成功的语言优先，这次没听清就换另一种再试一次（麦克风崩溃时不重试）。",
      "en_hint": "Auto prefers the language that worked last and retries with the other one if nothing is heard (no retry when the mic crashes)."},
 
+    # ---------------- 助理（操作权限）
+    {"key": "agent.enabled", "tab": "助理", "label": "启用助理能力",
+     "en_label": "Enable assistant abilities",
+     "type": "bool",
+     "hint": "关掉的话助手只会聊天，不会碰你的文件、网页、图片和电脑。",
+     "en_hint": "When off the assistant only chats - it never touches your files, web pages, images or the computer."},
+    {"key": "agent.work_dir", "tab": "助理", "label": "工作目录",
+     "en_label": "Working folder",
+     "type": "text",
+     "hint": "助手能读写的文件范围。留空 = 我的文档/Siri-OS。越出这个目录的文件一律拒绝。",
+     "en_hint": "The only folder the assistant may read and write. Empty means Documents/Siri-OS; anything outside is refused."},
+    {"key": "agent.allow_screen", "tab": "助理", "label": "允许操控电脑",
+     "en_label": "Allow computer control",
+     "type": "bool",
+     "hint": "鼠标点击、键盘输入、截图、切窗口、开程序。风险最高的一档，默认关。",
+     "en_hint": "Mouse clicks, typing, screenshots, switching windows, launching apps. The riskiest group, off by default."},
+    {"key": "agent.allow_shell", "tab": "助理", "label": "允许执行命令",
+     "en_label": "Allow running commands",
+     "type": "bool",
+     "hint": "在工作目录里跑命令行。默认关 —— 打开前想清楚要给它什么权限。",
+     "en_hint": "Run command lines inside the working folder. Off by default - think about what you are granting."},
+    {"key": "agent.max_rounds", "tab": "助理", "label": "单轮最多调用工具",
+     "en_label": "Max tool rounds",
+     "type": "int", "min": 1, "max": 12, "step": 1,
+     "unit": "次", "en_unit": "rounds",
+     "hint": "一次提问里最多连续调几次工具，防止绕圈。",
+     "en_hint": "How many tool calls may be chained for one question, so it cannot loop forever."},
+
+    # ---------------- 上下文
+    {"key": "ctx.enabled", "tab": "上下文", "label": "记住前几轮对话",
+     "en_label": "Remember previous turns",
+     "type": "bool",
+     "hint": "关掉的话每句都是新话题，「把它改短一点」这种接不上。只存在内存里，不落盘。",
+     "en_hint": "When off every question starts fresh, so 'make it shorter' has nothing to refer to. Kept in memory only, never written to disk."},
+    {"key": "ctx.history_turns", "tab": "上下文", "label": "记住几轮",
+     "en_label": "Turns to remember",
+     "type": "int", "min": 0, "max": 20, "step": 1,
+     "unit": "轮", "en_unit": "turns",
+     "hint": "一轮 = 你说一句 + 助手答一句。0 = 完全不记。",
+     "en_hint": "One turn = you speak and the assistant answers. 0 means no memory at all."},
+    {"key": "ctx.sysinfo", "tab": "上下文", "label": "附带电脑状态",
+     "en_label": "Include computer state",
+     "type": "bool",
+     "hint": "每次都告诉模型：当前开着哪些窗口、屏幕多大、工作目录在哪。要看屏幕画面，模型可以自己截图。",
+     "en_hint": "Tell the model every turn which windows are open, the screen size and the working folder. To see the actual screen it can take a screenshot itself."},
+
     # ---------------- 系统
     {"key": "autostart", "tab": "系统", "label": "开机自启", "en_label": "Start at login",
      "type": "bool",
@@ -373,7 +443,7 @@ SPEC = [
      "en_hint": "With it off there is no tray icon, so you cannot open settings or quit from the tray (use install_autostart.py stop to stop it)."},
 ] + _provider_specs()
 
-TABS = ["扩散", "跑马灯", "模型", "语音", "键位", "系统", "语言"]
+TABS = ["扩散", "跑马灯", "模型", "助理", "上下文", "语音", "键位", "系统", "语言"]
 TAB_EN = {
     "扩散": "Diffusion",
     "跑马灯": "Marquee",
@@ -382,6 +452,8 @@ TAB_EN = {
     "键位": "Keys",
     "系统": "System",
     "语言": "Language",
+    "助理": "Assistant",
+    "上下文": "Context",
 }
 
 

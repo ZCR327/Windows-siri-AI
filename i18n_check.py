@@ -125,12 +125,14 @@ def _check_new_features():
     dlg = S.SettingsDialog()
     try:
         sec_rows = [(sp, c) for sp, c in dlg.rows if sp.get("type") == "secret"]
-        ok(len(sec_rows) == 8, "面板上有 8 个密钥输入框", "-> %d" % len(sec_rows))
+        ok(len(sec_rows) == len(cfgstore.provider_order()),
+           "每家厂商一个密钥输入框", "-> %d" % len(sec_rows))
         for sp, ctrl in sec_rows:
             ctrl.setText("SELFTESTKEY-123456")
         cfg, secrets = dlg._collect()
         ok(isinstance(secrets, dict), "_collect 返回 (cfg, secrets)")
-        ok(len(secrets) == 8, "八个密钥都收进了 secrets", "-> %d" % len(secrets))
+        ok(len(secrets) == len(cfgstore.provider_order()),
+           "所有密钥都收进了 secrets", "-> %d" % len(secrets))
         ok(secrets.get("minimax") == "SELFTESTKEY-123456",
            "密钥名对得上", "-> %r" % sorted(secrets))
         for sp, _c in sec_rows:
@@ -216,14 +218,14 @@ def _check_model_picker():
     """模型选择器：8 家后端、清单全、下拉对得上、面板分组和友好名。
 
     有 key 的 3 家清单是**实测**的（服务端 /models + 逐个真实请求验活）；
-    其余 5 家抄官方文档 —— 面板 hint 里写明了这一点，不假装验过。
+    其余几家抄官方文档 —— 面板 hint 里写明了这一点，不假装验过。
     """
     import llm as llm_mod
     import providers as prov
     names = list(prov.ORDER)
-    ok(len(names) == 8, "注册表里有 8 家后端", "-> %d" % len(names))
+    ok(len(names) == len(prov.PROVIDERS), "注册表家数 == ORDER 家数", "-> %d" % len(names))
     ok(hasattr(cfgstore, "MODEL_CHOICES"), "cfgstore 有 MODEL_CHOICES")
-    ok(set(cfgstore.MODEL_CHOICES) == set(names), "8 家服务商都有模型清单",
+    ok(set(cfgstore.MODEL_CHOICES) == set(names), "每家服务商都有模型清单",
        "-> %s" % sorted(cfgstore.MODEL_CHOICES))
     total = 0
     for p in names:
@@ -238,7 +240,7 @@ def _check_model_picker():
         kinds = sorted([s["type"] for s in cfgstore.SPEC if s.get("provider") == p])
         ok(kinds == ["bool", "choice", "secret", "text"],
            "%s 有 启用/密钥/模型/地址 四个控件" % p, "-> %s" % kinds)
-    ok(total >= 90, "8 家加起来 >= 90 个模型", "-> %d" % total)
+    ok(total >= 90, "所有家加起来 >= 90 个模型", "-> %d" % total)
 
     for spec in cfgstore.SPEC:
         pname = spec.get("provider")
@@ -254,7 +256,7 @@ def _check_model_picker():
     ok(hasattr(llm_mod, "list_models"), "llm 有 list_models()")
     ok(hasattr(llm_mod, "make_backend"), "llm 有 make_backend()")
     ok(set(getattr(llm_mod, "MODELS_URL", {})) == set(names),
-       "llm 8 个 /models 地址都在")
+       "llm 每家都有 /models 地址")
     try:
         models, err = llm_mod.list_models("deepseek")
         if models:
@@ -287,7 +289,7 @@ def _check_model_picker():
     try:
         want = i18n.t("zh", "settings.models.refresh")
         nbtn = len([b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text() == want])
-        ok(nbtn == 8, "模型下拉旁有 8 个「拉取最新」按钮", "-> %d" % nbtn)
+        ok(nbtn == len(names), "模型下拉旁每家一个「拉取最新」按钮", "-> %d" % nbtn)
         combos = 0
         for spec, ctrl in dlg.rows:
             pname = spec.get("provider")
@@ -297,7 +299,7 @@ def _check_model_picker():
             got = [ctrl.itemText(i) for i in range(ctrl.count())]
             ok(got == cfgstore.MODEL_CHOICES[pname],
                "%s 下拉里的项 == 清单" % spec["key"], "-> %d 项" % len(got))
-        ok(combos == 8, "面板上有 8 个模型下拉", "-> %d" % combos)
+        ok(combos == len(names), "每家厂商一个模型下拉", "-> %d" % combos)
 
         titles = [g.title() for g in dlg.findChildren(QtWidgets.QGroupBox)]
         for pname in names:
@@ -310,12 +312,169 @@ def _check_model_picker():
             _sp, ctrl = order_rows[0]
             texts = [ctrl.list.item(i).text() for i in range(ctrl.list.count())]
             vals = ctrl.value()
-            ok(len(vals) == 8, "优先级列表有 8 项", "-> %d" % len(vals))
+            ok(len(vals) == len(names), "优先级列表项数 == 厂商数", "-> %d" % len(vals))
             ok(set(vals) == set(names), "优先级存的是厂商代号", "-> %s" % vals)
             ok(texts != vals, "优先级显示的不是代号")
             for pname in names:
                 ok(cfgstore.provider_label(pname, "zh") in texts,
                    "优先级里有 %s 的友好名" % pname)
+    finally:
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+
+
+def _check_agent():
+    """助理能力（操作权限）：配置 / 面板 / 工具 / 协议 都要对得上。"""
+    import tools as toolmod
+    import agent as agent_mod
+    import llm as llm_mod
+
+    # ---------------- 配置层
+    a = cfgstore.DEFAULTS.get("agent")
+    ok(isinstance(a, dict), "默认配置里有 agent 段")
+    if isinstance(a, dict):
+        ok(a.get("enabled") is False, "助理能力默认是关的")
+        ok(a.get("allow_screen") is False, "鼠标键盘默认是关的")
+        ok(a.get("allow_shell") is False, "执行命令默认是关的")
+        ok("work_dir" in a, "agent 段有 work_dir")
+    ok("助理" in cfgstore.TABS, "页签里有「助理」")
+    ok(cfgstore.TAB_EN.get("助理") == "Assistant", "「助理」有英文页签名")
+    agent_specs = [s for s in cfgstore.SPEC if s.get("tab") == "助理"]
+    ok(len(agent_specs) == 5, "助理页有 5 个旋钮", "-> %d" % len(agent_specs))
+    keys = sorted(s["key"] for s in agent_specs)
+    want_keys = sorted(["agent.enabled", "agent.work_dir", "agent.allow_screen",
+                         "agent.allow_shell", "agent.max_rounds"])
+    ok(keys == want_keys, "助理页的旋钮键名对", "-> %s" % keys)
+    for s in agent_specs:
+        ok(bool(s.get("label")) and bool(s.get("en_label")), "%s 有中英标签" % s["key"])
+        ok(bool(s.get("hint")) and bool(s.get("en_hint")), "%s 有中英提示" % s["key"])
+
+    # ---------------- 权限
+    off = {"agent": {"enabled": True}}
+    ok(toolmod.allowed(off, "file"), "开了总开关 -> 文件能用")
+    ok(toolmod.allowed(off, "web"), "开了总开关 -> 网页能用")
+    ok(toolmod.allowed(off, "image"), "开了总开关 -> 图片能用")
+    ok(not toolmod.allowed(off, "screen"), "鼠标键盘默认还是关的")
+    ok(not toolmod.allowed(off, "shell"), "执行命令默认还是关的")
+    on = {"agent": {"enabled": True, "allow_screen": True, "allow_shell": True}}
+    ok(toolmod.allowed(on, "screen"), "显式打开 -> 鼠标键盘能用")
+    ok(toolmod.allowed(on, "shell"), "显式打开 -> 执行命令能用")
+    ok(not toolmod.allowed({"agent": {"enabled": False}}, "file"),
+       "总开关关着 -> 什么都不能用")
+
+    # ---------------- 文件工具锁死工作目录
+    cfg = {"agent": {"enabled": True, "work_dir": ""}}
+    base = toolmod.work_dir(cfg)
+    ok(base.endswith(os.path.join("Documents", "Siri-OS")),
+       "默认工作目录是 我的文档/Siri-OS", "-> %s" % base)
+    try:
+        toolmod._safe_path(cfg, os.path.join("C:\\", "Windows", "System32", "cmd.exe"))
+        ok(False, "越界路径必须被拒绝")
+    except toolmod.ToolError:
+        ok(True, "越界路径被拒绝")
+    inside = toolmod._safe_path(cfg, "note.txt")
+    ok(inside.startswith(base), "工作目录内的路径放行", "-> %s" % inside)
+
+    # ---------------- 工具清单
+    ok(len(toolmod.TOOLS) == 27, "工具一共 27 个", "-> %d" % len(toolmod.TOOLS))
+    tnames = [t["name"] for t in toolmod.TOOLS]
+    ok(len(set(tnames)) == len(tnames), "工具名不重复")
+    for cat in toolmod.CATEGORIES:
+        ok(any(t["category"] == cat for t in toolmod.TOOLS), "有 %s 类工具" % cat)
+    spec = toolmod.spec_for(off)
+    ok(all(s["function"]["name"] in tnames for s in spec), "给模型的清单里没有野名字")
+    ok(len(toolmod.spec_for({"agent": {"enabled": False}})) == 0,
+       "总开关关着 -> 给模型的清单是空的")
+    ok(not any(s["function"]["name"] == "mouse_click" for s in toolmod.spec_for(off)),
+       "鼠标键盘没开 -> 不出现在给模型的清单里")
+
+    # ---------------- 协议层
+    for cls in (llm_mod.OpenAIBackend, llm_mod.ClaudeBackend, llm_mod.MinimaxBackend):
+        ok(hasattr(cls, "chat_tools"), "%s 有 chat_tools()" % cls.__name__)
+    ok(hasattr(llm_mod.LLM, "chat_tools"), "LLM 有 chat_tools()")
+    r1 = llm_mod._parse_openai_tool_reply({
+        "choices": [{"message": {"content": "hi", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "read_file",
+                          "arguments": "{\"path\": \"a.txt\"}"}}]}}]})
+    ok(r1[0] == "hi", "OpenAI 协议能解析出正文")
+    ok(bool(r1[1]) and r1[1][0]["name"] == "read_file", "OpenAI 协议能解析出工具调用")
+    ok(r1[1][0]["arguments"].get("path") == "a.txt", "工具参数被解析成字典")
+    r2 = llm_mod._parse_anthropic_tool_reply({
+        "content": [{"type": "text", "text": "hey"},
+                    {"type": "tool_use", "id": "t1", "name": "list_files", "input": {}}]})
+    ok(r2[0] == "hey", "Anthropic 协议能解析出正文")
+    ok(bool(r2[1]) and r2[1][0]["name"] == "list_files", "Anthropic 协议能解析出 tool_use")
+    ok(r2[1][0]["arguments"] == {}, "tool_use 的 input 是字典")
+
+    # ---------------- agent 模块
+    ok(hasattr(agent_mod, "run_agent"), "agent 有 run_agent()")
+    ok(agent_mod.run_agent({"agent": {"enabled": False}}, None, "hi") is None,
+       "助理没开 -> run_agent 返回 None（回落到普通聊天）")
+    cap = agent_mod.build_capability_prompt({"agent": {"enabled": True}})
+    ok(bool(cap), "能生成能力说明")
+    ok("工具" in cap, "能力说明里提到工具")
+
+
+def _check_context():
+    """上下文：对话记忆 + 电脑状态。"""
+    import context as ctx_mod
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    import settings as S
+    S.SettingsDialog._backend_check = lambda self: None
+    S.SettingsDialog._do_save = lambda self: None      # 不写活配置
+
+    # ---------------- 配置层
+    c = cfgstore.DEFAULTS.get("ctx")
+    ok(isinstance(c, dict), "默认配置里有 ctx 段")
+    if isinstance(c, dict):
+        ok("enabled" in c, "ctx 段有 enabled")
+        ok("history_turns" in c, "ctx 段有 history_turns")
+        ok("sysinfo" in c, "ctx 段有 sysinfo")
+    ok("上下文" in cfgstore.TABS, "页签里有「上下文」")
+    ok(cfgstore.TAB_EN.get("上下文") == "Context", "「上下文」有英文页签名")
+    specs = [s for s in cfgstore.SPEC if s.get("tab") == "上下文"]
+    ok(len(specs) == 3, "上下文页有 3 个旋钮", "-> %d" % len(specs))
+    for s in specs:
+        ok(bool(s.get("label")) and bool(s.get("en_label")), "%s 有中英标签" % s["key"])
+        ok(bool(s.get("hint")) and bool(s.get("en_hint")), "%s 有中英提示" % s["key"])
+
+    # ---------------- 对话记忆
+    conv = ctx_mod.Conversation()
+    conv.add_turn("问一", "答一")
+    conv.add_turn("问二", "答二")
+    ok(len(conv.history(6)) == 4, "两轮 = 4 条消息", "-> %d" % len(conv.history(6)))
+    ok(len(conv.history(1)) == 2, "只记 1 轮 = 2 条")
+    ok(ctx_mod.is_clear_command("清空上下文"), "认得清空指令")
+    ok(not ctx_mod.is_clear_command("把那个改短点"), "普通句子不误触发")
+
+    # ---------------- 交替整形（Anthropic 要求）
+    n = ctx_mod.normalize_roles([{"role": "user", "content": "a"},
+                                 {"role": "user", "content": "b"},
+                                 {"role": "assistant", "content": "c"}])
+    ok(len(n) == 2, "连续两条 user 被合并", "-> %d" % len(n))
+
+    # ---------------- 电脑状态
+    cfg = {"ctx": {"enabled": True, "history_turns": 6, "sysinfo": True},
+           "agent": {"enabled": True, "work_dir": ""}}
+    s1 = ctx_mod.system_context(cfg)
+    ok(bool(s1), "能生成电脑状态块")
+    ok("屏幕分辨率" in s1 or "工作目录" in s1, "状态块里有屏幕/目录信息")
+    ok(ctx_mod.system_context({"ctx": {"sysinfo": False}}) == "",
+       "关掉 sysinfo 就不生成状态块")
+    sp = ctx_mod.compose_system(cfg, extra="能力说明")
+    ok("能力说明" in sp, "compose_system 把附加内容拼进去了")
+
+    # ---------------- 面板上真的有这一页
+    dlg = S.SettingsDialog()
+    try:
+        ok("上下文" in dlg._tab_widgets, "面板上有「上下文」页签")
+        rows = [(sp2, ctrl) for sp2, ctrl in dlg.rows if sp2.get("tab") == "上下文"]
+        ok(len(rows) == 3, "面板「上下文」页有 3 个控件", "-> %d" % len(rows))
     finally:
         try:
             dlg.hide()
@@ -375,6 +534,24 @@ def _check_auto_enable():
             pass
 
 def main():
+    # ---- 守卫：活配置不许被自检改动 ----
+    live_path = cfgstore.CONFIG_PATH
+    try:
+        with io.open(live_path, "rb") as f:
+            live_before = f.read()
+    except Exception:
+        live_before = None
+    violations = []
+    _orig_save = cfgstore.save
+
+    def _safe_save(cfg, path=None):
+        target = path or cfgstore.CONFIG_PATH
+        if target == live_path:
+            violations.append(target)
+            return True
+        return _orig_save(cfg, path)
+
+    cfgstore.save = _safe_save
     sec("1. SPEC 字段完整性（每个旋钮都要有英文）")
     for spec in cfgstore.SPEC:
         key = spec.get("key")
@@ -514,8 +691,7 @@ def main():
     except Exception as e:
         ok(False, "新功能回归检查跑起来了", "-> %s" % e)
 
-    sec("14. 模型选择器（8 家后端 / 清单 / 下拉 / 分组 / 友好名）")
-    sec("14. 模型选择器（8 家后端 / 清单 / 下拉 / 分组 / 友好名）")
+    sec("14. 模型选择器（多家后端 / 清单 / 下拉 / 分组 / 友好名）")
     try:
         _check_model_picker()
     except Exception as e:
@@ -526,6 +702,36 @@ def main():
         _check_auto_enable()
     except Exception as e:
         ok(False, "自动启用回归检查跑起来了", "-> %s" % e)
+
+    sec("16. 助理能力（操作权限 / 工具 / 协议）")
+    try:
+        _check_agent()
+    except Exception as e:
+        ok(False, "助理能力回归检查跑起来了", "-> %s" % e)
+
+    sec("17. 上下文（对话记忆 + 电脑状态）")
+    try:
+        _check_context()
+    except Exception as e:
+        ok(False, "上下文回归检查跑起来了", "-> %s" % e)
+
+    # ---- 守卫：自检**不许改活配置** ----
+    # 面板一保存就会覆盖真配置；自检里造了面板就必须挡住。
+    # 之前就出过「自检跑完，agent 三个开关莫名变成 True」这类事。
+    try:
+        cfgstore.save = _orig_save
+    except Exception:
+        pass
+    try:
+        with io.open(live_path, "rb") as f:
+            live_after = f.read()
+    except Exception:
+        live_after = live_before
+    ok(live_after == live_before, "自检期间活配置一个字都没被改",
+       "-> %d 次写活配置" % len(violations))
+    if violations:
+        for v in violations[:5]:
+            print("       写活配置: %s" % v)
 
     print("\n%d checks, %d FAIL" % (CHECKS[0], len(FAILS)))
     if FAILS:

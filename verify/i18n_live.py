@@ -167,7 +167,7 @@ def ask_via_trigger(question, tag, frames=26, gap=0.7):
     """通过跨进程触发通道问一句，截卡片。
 
     ⚠️ 常驻助手「忙的时候丢弃新问题」（上一次回复还在播报）——
-       所以触发前先等上一轮说完，否则这一轮的问题会被丢��。
+       所以触发前先等上一轮说完，否则这一轮的问题会被丢。
     """
     time.sleep(6.0)          # 等上一轮播报结束
     cfgstore.fire_trigger(question)

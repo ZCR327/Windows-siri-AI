@@ -2,8 +2,10 @@
 # install:  pip install -r requirements.txt
 
 Pillow
+PyInstaller
 PyQt5
 numpy
 opencv-python
 pywin32
 requests
+win32clipboard

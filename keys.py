@@ -17,7 +17,13 @@ import io
 import json
 import os
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
+
+# 打包成 exe 后模块所在目录是**只读解包目录** —— 密钥库必须落在 exe 同级目录
+HERE = (pathmod.data_dir() if pathmod else os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(os.path.dirname(HERE))        # 上级工作区根（兼容旧的「工作区」布局）
 ENV_STORE = os.environ.get("SIRI_OS_KEYS", "").strip()
 
@@ -34,6 +40,10 @@ def _pick_store():
     if ENV_STORE:
         return ENV_STORE
     local = os.path.join(HERE, "config")
+    if pathmod is not None and pathmod.is_frozen():
+        # 打包后密钥库固定在 **exe 同级目录/config** ——
+        # 不能往上级目录找：那是 exe 所在文件夹的父目录，可能是共享盘/别人的目录
+        return os.path.join(local, "api_keys.json")
     if os.path.isdir(local):
         return os.path.join(local, "api_keys.json")
     return os.path.join(ROOT, "config", "api_keys.json")
@@ -41,7 +51,19 @@ def _pick_store():
 
 STORE = _pick_store()
 
-NAMES = ("minimax", "deepseek", "zhipu", "jina")
+def _names():
+    """密钥库里可能有的键 = 所有后端厂商 + jina（读注册表，别写死）。"""
+    out = []
+    try:
+        import providers as prov
+        out.extend(prov.ORDER)
+    except Exception:
+        out.extend(("minimax", "deepseek", "zhipu", "openai"))
+    out.append("jina")
+    return tuple(out)
+
+
+NAMES = _names()
 
 
 def load():

@@ -15,6 +15,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SUPERVISOR = os.path.join(HERE, "startup.py")
 SHORTCUT_NAME = "Siri-OS 语音助手.lnk"
 
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
+
+# 打包成 exe：开机自启直接指向 exe 自己，不再走 pythonw + startup.py 守护
+FROZEN = bool(pathmod is not None and pathmod.is_frozen())
+EXE = pathmod.exe_path() if FROZEN else None
+
 
 def startup_dir():
     appdata = os.environ.get("APPDATA")
@@ -53,9 +62,14 @@ def install():
         print("need pywin32 for .lnk creation: %s" % e)
         return 2
     lnk = shell.CreateShortCut(shortcut_path())
-    lnk.Targetpath = pythonw()
-    lnk.Arguments = '"%s"' % SUPERVISOR
-    lnk.WorkingDirectory = HERE
+    if FROZEN:
+        lnk.Targetpath = EXE
+        lnk.Arguments = ""
+        lnk.WorkingDirectory = pathmod.data_dir()
+    else:
+        lnk.Targetpath = pythonw()
+        lnk.Arguments = '"%s"' % SUPERVISOR
+        lnk.WorkingDirectory = HERE
     lnk.Description = "Siri-OS 桌面语音助手（常驻守护）"
     lnk.WindowStyle = 7
     lnk.save()
@@ -89,12 +103,20 @@ def status():
             print("  workdir   : %s" % lnk.WorkingDirectory)
         except Exception as e:
             print("  (cannot read: %s)" % e)
-    pidf = os.path.join(HERE, "logs", "supervisor.pid")
+    pidf = os.path.join((pathmod.data_dir() if pathmod else HERE), "logs", "supervisor.pid")
     if os.path.exists(pidf):
         try:
             with open(pidf, "r", encoding="utf-8") as f:
                 pid = f.read().strip()
             print("supervisor pid file: %s" % pid)
+        except Exception:
+            pass
+    if FROZEN:
+        # 打包后没有守护进程，助手自己就是那个进程
+        try:
+            import cfgstore
+            p = cfgstore.resident_pid()
+            print("resident pid: %s" % (p if p else "(not running)"))
         except Exception:
             pass
     return 0
@@ -103,6 +125,11 @@ def status():
 def start():
     """立刻拉起守护（不装自启也能用）。"""
     import subprocess
+    if FROZEN:
+        subprocess.Popen([EXE], cwd=pathmod.data_dir(),
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        print("started %s" % EXE)
+        return 0
     subprocess.Popen([pythonw(), SUPERVISOR], cwd=HERE,
                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     print("started supervisor")
@@ -112,7 +139,19 @@ def start():
 def stop():
     """停掉守护及其子进程。"""
     import subprocess
-    pidf = os.path.join(HERE, "logs", "supervisor.pid")
+    if FROZEN:
+        try:
+            import cfgstore
+            pid = cfgstore.resident_pid()
+        except Exception:
+            pid = None
+        if not pid:
+            print("assistant is not running")
+            return 0
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+        print("stopped assistant pid=%d" % pid)
+        return 0
+    pidf = os.path.join((pathmod.data_dir() if pathmod else HERE), "logs", "supervisor.pid")
     pid = 0
     try:
         with open(pidf, "r", encoding="utf-8") as f:

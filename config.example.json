@@ -28,6 +28,7 @@
       "minimax",
       "deepseek",
       "zhipu",
+      "openai",
       "claude",
       "qwen",
       "kimi",
@@ -42,7 +43,8 @@
       "qwen": false,
       "kimi": false,
       "gemini": false,
-      "doubao": false
+      "doubao": false,
+      "openai": false
     },
     "minimax_model": "MiniMax-M3.1-Flash",
     "minimax_base_url": "https://api.minimaxi.com/anthropic/v1",
@@ -67,7 +69,22 @@
     "gemini_api_key": "",
     "doubao_model": "doubao-seed-2-1-pro",
     "doubao_base_url": "https://ark.cn-beijing.volces.com/api/v3",
-    "doubao_api_key": ""
+    "doubao_api_key": "",
+    "openai_model": "gpt-6.1-sol",
+    "openai_base_url": "https://api.openai.com/v1",
+    "openai_api_key": ""
+  },
+  "agent": {
+    "enabled": false,
+    "work_dir": "",
+    "allow_screen": false,
+    "allow_shell": false,
+    "max_rounds": 6
+  },
+  "ctx": {
+    "enabled": true,
+    "history_turns": 6,
+    "sysinfo": true
   },
   "stt": {
     "timeout_sec": 10,

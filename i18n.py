@@ -80,6 +80,8 @@ STRINGS = {
     "settings.keys.opened": ("→ 已打开密钥窗口，在里面选后端并粘贴 key",
                              "→ Key window opened — pick a backend and paste the key"),
     "settings.keys.failed": ("✗ 打不开密钥窗口：%s", "✗ Cannot open the key window: %s"),
+    "settings.keys.inpanel": ("→ 密钥在「模型」页里填（每家厂商一个输入框），保存即写入密钥库",
+                              "-> Enter the keys on the Model tab (one field per provider); saving writes them to the key store"),
     "settings.backends.title": ("后端可用性（真实发一次请求）",
                                 "Backend availability (sends a real request)"),
     "settings.backends.checking": ("%s：检测中…", "%s: checking…"),
@@ -107,6 +109,14 @@ STRINGS = {
     "reply.error": ("出错了：%s", "Something went wrong: %s"),
     "reply.model_down": ("模型没连上。运行 python set_key.py 填一下 key 就能用。%s",
                          "The model isn't reachable. Run: python set_key.py to store a key. %s"),
+
+    # ---------------- 上下文
+    "ctx.cleared": ("好，前面说的都忘了。", "Okay, forgotten."),
+
+    # ---------------- 助理（工具调用）
+    "agent.tool": ("正在执行：%s", "Running: %s"),
+    "agent.acting": ("正在做事……", "Working on it..."),
+    "agent.done": ("做完了", "Done"),
 
     # ---------------- 托盘
     "tray.demo": ("演示一次", "Demo"),

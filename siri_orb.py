@@ -32,9 +32,18 @@ import i18n
 from llm import LLM
 import voice as voice_mod
 from keyhook import KeyHook
+import agent as agent_mod
+import tools as tools_mod
+import context as context_mod
+
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
 
 CONFIG_PATH = cfgstore.CONFIG_PATH
-LOG_DIR = os.path.join(HERE, "logs")
+# 日志必须落在**可写目录**（源码=脚本目录；打包后=exe 同级目录）
+LOG_DIR = os.path.join((pathmod.data_dir() if pathmod else HERE), "logs")
 KEY_LOG = os.path.join(LOG_DIR, "keyhook.log")
 
 # 默认值只有一份，在 cfgstore 里（设置面板的「恢复默认」也是用它）
@@ -55,13 +64,16 @@ def _merge(base, new):
 
 
 def load_config():
-    cfg = dict(DEFAULT_CONFIG)
+    """读配置。**第一次运行会自动生成一份默认配置**（打包成 exe 也一样）。
+
+    之前是自己 open() 读的：文件不存在时只会报错，配置也永远不落盘 ——
+    打包后应该在 exe 旁边自动多出一个 config.json。
+    """
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = _merge(cfg, json.load(f))
+        return cfgstore.load()
     except Exception as e:
         print("[siri_orb] config read failed: %s" % e)
-    return cfg
+        return dict(DEFAULT_CONFIG)
 
 
 def _hsv(h, s, v):
@@ -924,13 +936,40 @@ def _reply_chain(text, cfg, llm, speaker, emit):
         reply = voice_mod.try_local_command(text, lang=rl)
     except Exception:
         reply = None
+    conv = context_mod.get_conversation()
+    # 「清空上下文」是本地指令：直接把记忆清掉，不经过模型
+    if not reply and context_mod.is_clear_command(text):
+        conv.clear()
+        reply = i18n.t(ui, "ctx.cleared")
     if not reply:
         emit("thinking", i18n.t(ui, "reply.thinking"))
+        reply = None
+        # 🈳 上下文：前几轮一起发给模型，「把它改短一点」这种指代才接得上
+        hist = []
+        if context_mod.memory_enabled(cfg):
+            try:
+                hist = context_mod.normalize_roles(
+                    conv.history(context_mod.history_turns(cfg)))
+            except Exception:
+                hist = []
+        # 🈳 助理能力：开了开关、且模型支持工具调用时，让模型自己去调工具干活。
+        #    任何一步失败都回落到普通聊天 —— 加了工具不等于只能说工具。
         try:
-            reply = llm.chat([{"role": "user", "content": text}],
-                             system=i18n.build_system_prompt(cfg))
-        except Exception as e:
-            reply = i18n.t(ui, "reply.model_down") % str(e)[:70]
+            reply = agent_mod.run_agent(cfg, llm, text, emit=emit, history=hist)
+        except Exception:
+            reply = None
+        if not reply:
+            try:
+                msgs = context_mod.normalize_roles(
+                    list(hist) + [{"role": "user", "content": text}])
+                reply = llm.chat(msgs, system=context_mod.compose_system(cfg))
+            except Exception as e:
+                reply = i18n.t(ui, "reply.model_down") % str(e)[:70]
+    # 记这一轮（问 + 答）
+    try:
+        conv.add_turn(text, reply)
+    except Exception:
+        pass
     emit("speaking", reply)
     try:
         speaker.speak_localized(reply, lang=rl)
@@ -1084,7 +1123,34 @@ def run_demo(overlay):
     step()
 
 
+def _redirect_stdout_if_frozen():
+    """打包成 exe 之后没有控制台 —— stdout/stderr 得自己落到日志文件。
+
+    不落盘的话，pythonw 下 traceback 直接丢掉，出了错什么都看不见。
+
+    ⚠️ 必须**行缓冲**（buffering=1）：默认块缓冲的话常驻进程不退出，
+       缓冲区永远不刷，日志文件一直是空的 —— 看着像「零异常」，其实什么都没记上。
+    """
+    if pathmod is None or not pathmod.is_frozen():
+        return None
+    try:
+        d = os.path.join(pathmod.data_dir(), "logs")
+        if not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        f = open(os.path.join(d, "siri_orb.log"), "a", buffering=1, encoding="utf-8")
+        sys.stdout = f
+        sys.stderr = f
+        return f
+    except Exception:
+        return None
+
+
 def main():
+    # 打包后同一个 exe 也能开设置面板（--settings）
+    if "--settings" in sys.argv:
+        import settings as settings_mod
+        sys.exit(settings_mod.main())
+    _redirect_stdout_if_frozen()
     cfg = load_config()
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
     QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
@@ -1096,6 +1162,21 @@ def main():
     if screen:
         overlay.setGeometry(screen.geometry())
     overlay.show()
+
+    # 截图工具用得上：截之前先把覆盖层藏起来，否则截出来的是自己的光晕
+    def _hide_overlay(hide):
+        try:
+            if hide:
+                overlay.hide()
+            else:
+                overlay.show()
+        except Exception:
+            pass
+
+    try:
+        tools_mod.set_hook("hide_overlay", _hide_overlay)
+    except Exception:
+        pass
 
     demo = "--demo" in sys.argv
     voice_thread = None
@@ -1165,8 +1246,13 @@ def main():
         """拉起设置面板（独立进程 —— 助手没在跑也能打开改配置）。"""
         try:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            subprocess.Popen([sys.executable, os.path.join(HERE, "settings.py")],
-                             cwd=HERE, creationflags=flags)
+            if pathmod is not None and pathmod.is_frozen():
+                # 打包后还是这个 exe，加 --settings
+                subprocess.Popen([sys.executable, "--settings"],
+                                 cwd=pathmod.data_dir(), creationflags=flags)
+            else:
+                subprocess.Popen([sys.executable, os.path.join(HERE, "settings.py")],
+                                 cwd=HERE, creationflags=flags)
         except Exception as e:
             print("[siri_orb] cannot open settings: %s" % e)
 
@@ -1185,6 +1271,9 @@ def main():
         tray.setContextMenu(menu)
         tray.setToolTip(i18n.t(tray_lang, "tray.tooltip"))
         tray.show()
+        # 托盘图标是打包后唯一的入口 —— 图标为空的话 Windows 根本不会显示它，
+        # 打包后没有控制台，只能靠这行日志判断。
+        print("[siri_orb] tray icon ready (null=%s)" % tray.icon().isNull())
     else:
         print("[siri_orb] tray icon disabled by config -> no settings / quit entry")
 

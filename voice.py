@@ -21,8 +21,15 @@ if HERE not in sys.path:
 
 import i18n
 
-LISTEN_PS1 = os.path.join(HERE, "listen.ps1")
-TMP_DIR = os.path.join(HERE, "tmp")
+try:
+    import paths as pathmod
+except Exception:      # pragma: no cover
+    pathmod = None
+
+# listen.ps1 是**只读资源**：打包后要在解包目录里找（bundle_dir）
+# 临时结果是**可写数据**：打包后写在 exe 同级目录（data_dir）
+LISTEN_PS1 = os.path.join((pathmod.bundle_dir() if pathmod else HERE), "listen.ps1")
+TMP_DIR = os.path.join((pathmod.data_dir() if pathmod else HERE), "tmp")
 
 try:
     import win32com.client

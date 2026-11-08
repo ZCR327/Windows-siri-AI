@@ -38,6 +38,10 @@ recording.</sub>
 
 **Requirements:** Windows 10/11, Python 3.10+, a screen with a taskbar.
 
+**Or no Python at all:** `build_exe.py` produces a single `Siri-OS.exe` you can copy
+anywhere and double-click. It writes `config.json`, the key store and its logs next to
+itself. See [One file, no Python](#one-file-no-python).
+
 ```powershell
 pip install -r requirements.txt
 # config.json is generated on first run - nothing to copy
@@ -189,8 +193,13 @@ voice.py         offline dictation (SAPI) + TTS + local system commands (zh + en
 i18n.py          single source of truth for every user-visible string (zh / en)
 cfgstore.py      config layer: DEFAULTS + declarative SPEC + atomic read/write
 settings.py      graphical settings window (separate process, tray entry)
-providers.py      backend registry: 8 providers, 101 model ids, one row each
-llm.py           model backends: 8 providers over two protocols (anthropic / OpenAI)
+providers.py      backend registry: 9 providers, 120 model ids, one row each
+llm.py           model backends: 9 providers over two protocols (anthropic / OpenAI)
+                 + tool calling (OpenAI tool_calls / Anthropic tool_use)
+agent.py         the tool loop: model asks for a tool, we run it, we feed it back
+tools.py         27 tools: files, web, images, mouse + keyboard, windows, shell
+context.py       conversation memory + a snapshot of what is on the screen right now
+paths.py         where things live: source tree vs. frozen exe (read-only vs. writable)
 keys.py          API key store (never committed)
 startup.py       supervisor: relaunches the assistant if it dies
 install_autostart.py  per-user autostart via the Startup folder (no admin rights needed)
@@ -200,11 +209,11 @@ install_autostart.py  per-user autostart via the Startup folder (no admin rights
 
 ![settings panel](docs/settings-en.png)
 
-64 knobs across 7 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
+76 knobs across 9 tabs, generated from `cfgstore.SPEC`. Add a knob, get a control.
 
 What the panel can do now:
 
-- **Enter API keys** - one key field per provider (eight in total) on the Model tab. Saving a key also switches that provider on. **Keys only ever reach the key
+- **Enter API keys** - one key field per provider (nine in total) on the Model tab. Saving a key also switches that provider on. **Keys only ever reach the key
   store**, never `config.json`.
 - **Switch backends off one by one** - a disabled backend is **never even built**, so not a
   single request goes out to it.
@@ -214,10 +223,10 @@ What the panel can do now:
   (**the key store is left alone**).
 - **Zero-config first run** - clone it, run it, and `config.json` is created for you.
 - **Pick a model** - each backend's dropdown lists every model of that provider that
-  actually works (9 MiniMax / 5 DeepSeek / 16 Zhipu / 20 Claude / 13 Qwen / 12 Kimi / 15 Gemini / 11 Doubao), you can still type a name that is
+  actually works (9 MiniMax / 5 DeepSeek / 16 Zhipu / 19 ChatGPT / 20 Claude / 13 Qwen / 12 Kimi / 15 Gemini / 11 Doubao), you can still type a name that is
   not in the list, and "Refresh" asks the provider's `/models` endpoint for the current set.
 
-### Eight providers, one registry
+### Nine providers, one registry
 
 `providers.py` holds one row per provider - protocol, endpoint, model list, key environment variable. The settings panel, the config layer and the request layer all read that same table, so adding a provider is a one-line change: the panel grows the controls, the config grows the defaults, the backend grows an entry.
 
@@ -226,13 +235,14 @@ What the panel can do now:
 | MiniMax | anthropic `/messages` | `api.minimaxi.com/anthropic/v1` |
 | DeepSeek | OpenAI | `api.deepseek.com` |
 | Zhipu GLM | OpenAI | `open.bigmodel.cn/api/paas/v4` |
+| ChatGPT | OpenAI | `api.openai.com/v1` |
 | Claude | anthropic `/messages` | `api.anthropic.com/v1` |
 | Qwen | OpenAI | `dashscope.aliyuncs.com/compatible-mode/v1` |
 | Kimi | OpenAI | `api.moonshot.cn/v1` |
 | Gemini | OpenAI | `generativelanguage.googleapis.com/v1beta/openai` |
 | Doubao | OpenAI | `ark.cn-beijing.volces.com/api/v3` |
 
-`test_providers.py` proves the wiring without needing eight accounts: it runs every backend against a local mock server (asserting the request shape, the response parsing and the 401/402/400 handling), then probes each real endpoint with a fake key and expects an **auth error rather than a connection error** - which is what proves the URL and the protocol are right.
+`test_providers.py` proves the wiring without needing nine accounts: it runs every backend against a local mock server (asserting the request shape, the response parsing and the 401/402/400 handling), then probes each real endpoint with a fake key and expects an **auth error rather than a connection error** - which is what proves the URL and the protocol are right.
 
 ### Design notes worth stealing
 
@@ -254,6 +264,75 @@ What the panel can do now:
   top-level layout items leaves the widgets *inside* nested layouts alive, and they keep
   painting — you get the old button rendered on top of the new one. Detach the container,
   not its children. The regression test counts buttons before and after: it must not grow.
+
+### The assistant can actually do things
+
+A voice assistant that can only talk is a dictation app. `tools.py` gives the model 27
+real actions on this machine, and `agent.py` runs the loop: the model asks for a tool,
+we run it, we hand the result back, it decides what to do next.
+
+| group | what it can do |
+|---|---|
+| files | list / read / write / edit / search - inside one folder only |
+| web | open a URL, fetch a page as text, search the web |
+| images | inspect, resize, crop, rotate, convert, effects, watermark, thumbnail |
+| screen | screenshot, move/click/scroll the mouse, type text, press keys, list and focus windows, launch an app |
+| shell | run a command line in the working folder |
+
+Two rules keep that from becoming a footgun:
+
+- **Files are locked to one folder.** The working directory defaults to
+  `Documents/Siri-OS`; a path outside it is refused before it ever reaches the disk.
+- **The risky groups are off by default.** Mouse and keyboard, and the shell, each have
+  their own switch next to the master switch. Files, web and images are on.
+
+Both protocols are implemented, because the providers disagree: OpenAI-compatible
+backends use `tool_calls` plus a `role=tool` result message, Anthropic-style backends
+use `tool_use` blocks plus a `tool_result` block. `agent.py` normalises both into one
+shape and follows the protocol of whichever backend answered.
+
+One subtlety worth stealing: **the follow-up request has to go back to the same
+backend.** The `tool_call_id` was minted by that model, so switching providers
+mid-loop breaks the transcript. `LLM.chat_tools(..., backend=...)` pins it.
+
+### Context: it remembers, and it knows what is on screen
+
+Two independent pieces, both switchable:
+
+- **Conversation memory** - the last few turns (one turn = you speak + it answers) go
+  out with the current question, so "make it shorter" refers to something. It lives in
+  memory only: never written to disk, gone when the process exits. "Clear the context"
+  is handled locally and never reaches the model.
+- **Computer state** - every request carries a short snapshot: the foreground window,
+  the list of open windows, the screen size, the working folder and which abilities are
+  on. The model can call `screenshot` when it really needs to *see* the screen, but it
+  does not pay for a screenshot on every turn.
+
+Anthropic requires alternating `user` / `assistant` turns, and concatenating history
+with the current question can produce two `user` messages in a row - so the messages
+are normalised before they leave.
+
+### One file, no Python
+
+`build_exe.py` runs PyInstaller over `siri_os.spec` and produces a single
+`Siri-OS.exe` you can copy anywhere and double-click.
+
+The frozen build has **two** directories, and confusing them is the classic bug: the
+unpack directory (`sys._MEIPASS`) is read-only and holds the code and `listen.ps1`;
+the **exe directory** is writable and holds `config.json`, the key store and the logs.
+`paths.py` is the only place that knows the difference - `bundle_dir()` for read-only
+resources, `data_dir()` for everything that gets written.
+
+Other things the frozen build has to deal with:
+
+- **No console.** `sys.stdout` is redirected to `logs/siri_orb.log` - with *line*
+  buffering, because a block-buffered file stays empty forever in a process that never
+  exits.
+- **No `python.exe` to spawn.** The settings window is the same exe with
+  `--settings`.
+- **Autostart** points at the exe itself instead of `pythonw + startup.py`.
+- **Keys** are entered in the settings panel (the console-based `set_key.py` needs a
+  terminal to read a key from).
 
 ---
 

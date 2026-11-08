@@ -24,7 +24,18 @@ if HERE not in sys.path:
 import keys as keylib
 
 CFG = os.path.join(HERE, "config.json")
-BACKENDS = ("minimax", "deepseek", "zhipu")
+
+
+def _backends():
+    """有哪些后端可以设 key —— 按注册表来，别写死。"""
+    try:
+        import providers as prov
+        return tuple(prov.ORDER)
+    except Exception:
+        return ("minimax", "deepseek", "zhipu", "openai")
+
+
+BACKENDS = _backends()
 
 
 def load():
@@ -74,38 +85,30 @@ def clean_key(raw):
 def pick():
     arg = ""
     for a in sys.argv[1:]:
-        if a in ("--minimax", "--deepseek", "--zhipu"):
+        if a.startswith("--") and a[2:] in BACKENDS:
             arg = a[2:]
     if arg:
         return arg
     print("Which backend do you want to set?")
-    print("  1) minimax   (anthropic protocol, https://api.minimaxi.com/v1)")
-    print("  2) deepseek  (openai protocol,   https://api.deepseek.com)")
-    print("  3) zhipu     (openai protocol,   https://open.bigmodel.cn/api/paas/v4)")
-    print("  4) all")
-    ans = ask("choice [1/2/3/4]: ").strip()
-    if ans == "2":
-        return "deepseek"
-    if ans == "3":
-        return "zhipu"
-    if ans == "4":
+    for i, name in enumerate(BACKENDS, 1):
+        print("  %d) %s" % (i, name))
+    print("  %d) all" % (len(BACKENDS) + 1))
+    ans = ask("choice [1-%d]: " % (len(BACKENDS) + 1)).strip()
+    try:
+        n = int(ans)
+    except ValueError:
+        n = 1
+    if n == len(BACKENDS) + 1:
         return "all"
-    return "minimax"
+    if 1 <= n <= len(BACKENDS):
+        return BACKENDS[n - 1]
+    return BACKENDS[0]
 
 
 def make(name, lcfg):
-    from llm import MinimaxBackend, DeepSeekBackend, ZhipuBackend
-    if name == "minimax":
-        return MinimaxBackend(model=lcfg.get("minimax_model"),
-                               api_key=lcfg.get("minimax_api_key"),
-                               base_url=lcfg.get("minimax_base_url"))
-    if name == "zhipu":
-        return ZhipuBackend(model=lcfg.get("zhipu_model"),
-                            api_key=lcfg.get("zhipu_api_key"),
-                            base_url=lcfg.get("zhipu_base_url"))
-    return DeepSeekBackend(model=lcfg.get("deepseek_model"),
-                            api_key=lcfg.get("deepseek_api_key"),
-                            base_url=lcfg.get("deepseek_base_url"))
+    """按注册表造后端 —— 和助手/面板自检走同一条路（make_backend）。"""
+    from llm import make_backend
+    return make_backend(name, lcfg)
 
 
 def test(cfg, name):

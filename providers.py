@@ -158,10 +158,35 @@ PROVIDERS = {
             "doubao-seed-1.6-vision", "doubao-seed-character", "doubao-seed-evolving",
         ],
     },
+    "openai": {
+        "label": ("ChatGPT", "ChatGPT"),
+        "protocol": "openai",
+        "base_url": "https://api.openai.com/v1",
+        "models_url": "https://api.openai.com/v1/models",
+        "env": "OPENAI_API_KEY",
+        "default_model": "gpt-6.1-sol",
+        "verified": False,
+        "note": "OpenAI 官方端点。旗舰是 gpt-6-astra，默认用 gpt-6.1-sol（官方定位：性能与成本均衡）。",
+        "note_en": "OpenAI's own endpoint. gpt-6-astra is the flagship; gpt-6.1-sol balances intelligence and cost.",
+        "models": [
+            "gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-luna",
+            "gpt-6-sol", "gpt-6-cyber",
+            "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-cyber",
+            "gpt-5.5", "gpt-5.5-pro",
+            "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-pro",
+            "gpt-5.2", "gpt-5.2-pro",
+            "chat-latest", "gpt-audio-1.5",
+        ],
+        # 图片模型走另一套端点（/images/generations），不混进对话模型下拉
+        "image_models": [
+            "gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+            "gpt-image-2.6-flare", "gpt-image-2.6-sunburst",
+        ],
+    },
 }
 
 # 面板「后端优先级」里的默认顺序（也是没配置时的尝试顺序）
-ORDER = ["minimax", "deepseek", "zhipu", "claude", "qwen", "kimi", "gemini", "doubao"]
+ORDER = ["minimax", "deepseek", "zhipu", "openai", "claude", "qwen", "kimi", "gemini", "doubao"]
 
 # 新装的用户默认只开这 3 家 —— 其余 5 家得自己填 key 才开
 DEFAULT_ENABLED = ["minimax", "deepseek", "zhipu"]

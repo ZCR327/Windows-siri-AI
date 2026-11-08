@@ -45,6 +45,87 @@ _FATAL_MARKERS = ("401", "402", "403", "invalid api key", "auth failed",
                   "insufficient_balance", "insufficient balance", "unauthorized")
 
 
+# ------------------------------------------------------------------ 工具调用
+# 两种协议的形状差很多，但**对上层只暴露一种**：都归一成
+#   {"text": str, "tool_calls": [{"id","name","arguments"(dict)}], "protocol": "openai"|"anthropic"}
+# 上层（agent.py）只按 protocol 拼下一轮的消息，两边写法都在那儿处理。
+
+def _parse_json_args(raw):
+    """工具参数：模型给的是 JSON 字符串；解析失败就当空字典（别让一轮对话整个炸掉）。"""
+    if isinstance(raw, dict):
+        return raw
+    if not raw:
+        return {}
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _openai_tool_payload(model, messages, tools, system, max_tokens, temperature):
+    payload = {
+        "model": model,
+        "messages": ([{"role": "system", "content": system}] if system else []) + list(messages),
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+    }
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    headers = {"content-type": "application/json", "authorization": "Bearer "}
+    return payload, headers
+
+
+def _parse_openai_tool_reply(data):
+    choices = data.get("choices") or []
+    msg = (choices[0].get("message") or {}) if choices else {}
+    calls = []
+    for tc in (msg.get("tool_calls") or []):
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        if not name:
+            continue
+        calls.append({"id": tc.get("id") or "", "name": name,
+                      "arguments": _parse_json_args(fn.get("arguments"))})
+    return (msg.get("content") or "").strip(), calls
+
+
+def _anthropic_tool_payload(model, messages, tools, system, max_tokens, temperature):
+    payload = {"model": model, "max_tokens": max_tokens,
+               "messages": list(messages), "temperature": temperature}
+    if system:
+        payload["system"] = system
+    if tools:
+        payload["tools"] = [{
+            "name": t.get("function", {}).get("name"),
+            "description": t.get("function", {}).get("description", ""),
+            "input_schema": t.get("function", {}).get("parameters")
+                           or {"type": "object", "properties": {}},
+        } for t in tools]
+    headers = {"content-type": "application/json", "anthropic-version": "2023-06-01"}
+    return payload, headers
+
+
+def _parse_anthropic_tool_reply(data):
+    texts = []
+    calls = []
+    for block in (data.get("content") or []):
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            texts.append(block.get("text") or "")
+        elif kind == "tool_use":
+            inp = block.get("input")
+            calls.append({"id": block.get("id") or "", "name": block.get("name") or "",
+                          "arguments": inp if isinstance(inp, dict) else {}})
+    return "".join(texts).strip(), calls
+
+
 def _store_key(name):
     if keylib is None:
         return ""
@@ -173,6 +254,42 @@ class MinimaxBackend(object):
         msg = choices[0].get("message") or {}
         return (msg.get("content") or "").strip()
 
+    def chat_tools(self, messages, tools=None, system=None, max_tokens=1024, temperature=0.6):
+        """MiniMax 走 Anthropic 协议；404 时回落到 OpenAI 兼容协议（和 chat() 一样的规矩）。"""
+        if not self.available():
+            raise RuntimeError("minimax: no api key")
+        headers = {
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "x-api-key": self.api_key,
+            "authorization": "Bearer " + self.api_key,
+        }
+        payload, _ = _anthropic_tool_payload(self.model, messages, tools, system,
+                                             max_tokens, temperature)
+        try:
+            r = requests.post(self.base_url + "/messages", headers=headers, json=payload,
+                              timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError("minimax request failed: %s" % e)
+        if r.status_code < 400:
+            text, calls = _parse_anthropic_tool_reply(r.json())
+            return {"text": text, "tool_calls": calls, "protocol": "anthropic"}
+        if r.status_code != 404:
+            raise RuntimeError("minimax http %s: %s" % (r.status_code, r.text[:200]))
+        opayload, oheaders = _openai_tool_payload(self.model, messages, tools, system,
+                                                  max_tokens, temperature)
+        oheaders["authorization"] = "Bearer " + self.api_key
+        try:
+            r2 = requests.post(self.base_url + "/chat/completions", headers=oheaders,
+                               json=opayload, timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError("minimax fallback failed: %s" % e)
+        if r2.status_code >= 400:
+            raise RuntimeError("minimax /messages 404; fallback http %s: %s"
+                               % (r2.status_code, r2.text[:200]))
+        text, calls = _parse_openai_tool_reply(r2.json())
+        return {"text": text, "tool_calls": calls, "protocol": "openai"}
+
 
 class ClaudeBackend(object):
     """anthropic /messages 协议（Claude）。
@@ -223,6 +340,23 @@ class ClaudeBackend(object):
             raise RuntimeError("%s http %s: %s" % (self.name, r.status_code, r.text[:200]))
         return MinimaxBackend._parse_anthropic(r.json())
 
+    def chat_tools(self, messages, tools=None, system=None, max_tokens=1024, temperature=0.6):
+        """Anthropic 协议的工具调用（tool_use）。"""
+        if not self.available():
+            raise RuntimeError("%s: no api key" % self.name)
+        payload, headers = _anthropic_tool_payload(self.model, messages, tools, system,
+                                                   max_tokens, temperature)
+        headers["x-api-key"] = self.api_key
+        try:
+            r = requests.post(self.base_url + "/messages", headers=headers, json=payload,
+                              timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError("%s request failed: %s" % (self.name, e))
+        if r.status_code >= 400:
+            raise RuntimeError("%s http %s: %s" % (self.name, r.status_code, r.text[:200]))
+        text, calls = _parse_anthropic_tool_reply(r.json())
+        return {"text": text, "tool_calls": calls, "protocol": "anthropic"}
+
 
 class OpenAIBackend(object):
     """OpenAI /chat/completions 兼容协议的通用后端（DeepSeek / 智谱 共用）。"""
@@ -270,6 +404,23 @@ class OpenAIBackend(object):
         if r.status_code >= 400:
             raise RuntimeError("%s http %s: %s" % (self.name, r.status_code, r.text[:200]))
         return MinimaxBackend._parse_openai(r.json())
+
+    def chat_tools(self, messages, tools=None, system=None, max_tokens=1024, temperature=0.6):
+        """OpenAI 兼容协议的工具调用（tool_calls）。"""
+        if not self.available():
+            raise RuntimeError("%s: no api key" % self.name)
+        payload, headers = _openai_tool_payload(self.model, messages, tools, system,
+                                                 max_tokens, temperature)
+        headers["authorization"] = "Bearer " + self.api_key
+        try:
+            r = requests.post(self.base_url + "/chat/completions", headers=headers,
+                              json=payload, timeout=self.timeout)
+        except Exception as e:
+            raise RuntimeError("%s request failed: %s" % (self.name, e))
+        if r.status_code >= 400:
+            raise RuntimeError("%s http %s: %s" % (self.name, r.status_code, r.text[:200]))
+        text, calls = _parse_openai_tool_reply(r.json())
+        return {"text": text, "tool_calls": calls, "protocol": "openai"}
 
 
 class DeepSeekBackend(OpenAIBackend):
@@ -468,4 +619,50 @@ class LLM(object):
                 if any(mk in low for mk in _FATAL_MARKERS):
                     self._broken[b.name] = "auth/balance error (disabled for this session)"
                 errs.append("%s: %s" % (b.name, msg))
+        raise RuntimeError(" | ".join(errs) if errs else "no backend")
+
+    def chat_tools(self, messages, tools=None, system=None, max_tokens=1024,
+                   temperature=0.6, backend=None):
+        """带工具的一次请求。
+
+        返回 {"text", "tool_calls", "protocol", "backend"}。
+        backend 不为空 = 强制用这个后端。**工具对话的后续轮次必须回到同一个模型**，
+        否则 tool_call id 对不上、结果无处安放 —— 所以下一轮要把 backend 传回来。
+        """
+        errs = []
+        if backend:
+            pool = [b for b in self.backends if b.name == backend]
+            if not pool:
+                raise RuntimeError("backend %s is not available" % backend)
+        else:
+            pool = list(self.backends)
+        for b in pool:
+            if b.name in self._broken and not backend:
+                errs.append("%s: skipped (%s)" % (b.name, self._broken[b.name]))
+                continue
+            try:
+                b.refresh()
+            except Exception:
+                pass
+            if not b.available():
+                errs.append("%s: no key" % b.name)
+                continue
+            try:
+                res = b.chat_tools(messages, tools=tools, system=system,
+                                   max_tokens=max_tokens, temperature=temperature)
+            except Exception as e:
+                msg = str(e)
+                low = msg.lower()
+                if any(mk in low for mk in _FATAL_MARKERS):
+                    self._broken[b.name] = "auth/balance error (disabled for this session)"
+                errs.append("%s: %s" % (b.name, msg))
+                continue
+            res = res or {}
+            res["backend"] = b.name
+            res.setdefault("text", "")
+            res.setdefault("tool_calls", [])
+            res.setdefault("protocol", "openai")
+            if res["tool_calls"] or res["text"]:
+                return res
+            errs.append("%s: empty reply" % b.name)
         raise RuntimeError(" | ".join(errs) if errs else "no backend")

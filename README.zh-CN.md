@@ -34,6 +34,9 @@
 
 **环境要求：** Windows 10/11、Python 3.10+、一块有任务栏的屏幕。
 
+**或者干脆不装 Python**：`build_exe.py` 会打出一个单文件 `Siri-OS.exe`，
+拷到哪都能双击跑。配置、密钥库、日志都写在 exe 旁边。
+
 ```powershell
 pip install -r requirements.txt
 # config.json 不用手动建 —— 第一次跑会自动生成一份默认配置
@@ -172,8 +175,13 @@ voice.py         离线听写（SAPI）+ 播报 + 本地系统指令（中英两
 i18n.py          所有用户可见文案的唯一真源（中 / 英）
 cfgstore.py      配置层：DEFAULTS + 声明式 SPEC + 原子读写
 settings.py      图形化设置窗口（独立进程，托盘入口）
-providers.py      后端注册表：8 家厂商 / 101 个模型 id，一家一行
-llm.py           模型后端：8 家厂商，两种协议（anthropic / OpenAI 兼容）
+providers.py      后端注册表：9 家厂商 / 120 个模型 id，一家一行
+llm.py           模型后端：9 家厂商，两种协议（anthropic / OpenAI 兼容）
+                 + 工具调用（OpenAI tool_calls / Anthropic tool_use）
+agent.py         工具循环：模型要调工具 -> 我们真的去调 -> 结果喂回去
+tools.py         27 个工具：文件 / 网页 / 图片 / 鼠标键盘 / 窗口 / 命令行
+context.py       对话记忆 + 「此刻屏幕上有什么」的快照
+paths.py         路径：源码目录 vs 打包后的 exe（只读 vs 可写）
 keys.py          API key 仓库（不进版本库）
 startup.py       守护进程：助手挂了自动重拉
 install_autostart.py  当前用户级开机自启（不需要管理员权限）
@@ -183,19 +191,19 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 
 ![设置面板](docs/settings-en.png)
 
-7 个页签 64 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
+9 个页签 76 个旋钮，控件由 `cfgstore.SPEC` 自动生成 —— 加一个旋钮就多一个控件。
 
 面板里现在能直接做的事：
 
-- **填 API key**：模型页每家厂商一个密钥框（八个，留空 = 不改现有 key）；填完顺手把这一家**自动启用**。**密钥只写进密钥库**，永远不进 `config.json`。
+- **填 API key**：模型页每家厂商一个密钥框（九个，留空 = 不改现有 key）；填完顺手把这一家**自动启用**。**密钥只写进密钥库**，永远不进 `config.json`。
 - **逐个开关后端**：`llm.enabled.*` 关掉的后端**根本不建**，一次请求都不会发出去。
 - **开机自启 / 托盘图标**：在「系统」页签里直接切；开机自启用启动文件夹快捷方式（当前用户级，不要管理员权限）。
 - **一键恢复**：底部「恢复推荐配置」把所有旋钮拉回推荐值（**不动密钥库里的 key**）。
 - **首次运行零配置**：clone 下来直接跑，第一次运行自动生成 `config.json`。
-- **选模型**：三个后端各自的下拉里列了该家**全部实测可用的模型**（MiniMax 9 / DeepSeek 5 / 智谱 16 / Claude 20 / 千问 13 / Kimi 12 / Gemini 15 / 豆包 11），
+- **选模型**：每家后端的下拉里列了该家**全部实测可用的模型**（MiniMax 9 / DeepSeek 5 / 智谱 16 / ChatGPT 19 / Claude 20 / 千问 13 / Kimi 12 / Gemini 15 / 豆包 11），
   可以手输清单外的模型名；旁边的「拉取最新」直接问服务商的 `/models` 端点现场刷新。
 
-### 八家后端，一张注册表
+### 九家后端，一张注册表
 
 `providers.py` 每家厂商一行 —— 协议、接口地址、模型清单、key 的环境变量。
 设置面板、配置层、请求层读的是**同一张表**，所以加一家厂商只改一行：
@@ -206,13 +214,14 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 | MiniMax | anthropic `/messages` | `api.minimaxi.com/anthropic/v1` |
 | DeepSeek | OpenAI | `api.deepseek.com` |
 | 智谱 GLM | OpenAI | `open.bigmodel.cn/api/paas/v4` |
+| ChatGPT | OpenAI | `api.openai.com/v1` |
 | Claude | anthropic `/messages` | `api.anthropic.com/v1` |
 | 千问 | OpenAI | `dashscope.aliyuncs.com/compatible-mode/v1` |
 | Kimi | OpenAI | `api.moonshot.cn/v1` |
 | Gemini | OpenAI | `generativelanguage.googleapis.com/v1beta/openai` |
 | 豆包 | OpenAI | `ark.cn-beijing.volces.com/api/v3` |
 
-`test_providers.py` 不用八个账号也能证明接线对不对：先把每个后端打到本地 mock 服务器
+`test_providers.py` 不用九个账号也能证明接线对不对：先把每个后端打到本地 mock 服务器
 （验请求形状、响应解析、401/402/400 的处理），再拿**假 key** 打真实端点，
 期望回的是**鉴权错**而不是连不上 —— 这才是「地址和协议真的对」的证据。
 
@@ -228,6 +237,64 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 - **PyQt 面板"换语言"必须拆掉整棵控件树**：只对顶层布局项做 `setParent(None)`，
   **嵌套布局里的控件根本不在顶层项里**，它们会留下来继续画 —— 表现就是"中文按钮压在英文按钮上"。
   要拆的是容器，不是它的孩子。回归判据用控件数：重建前后按钮数不能增长。
+
+### 助理真的能动手
+
+只会说话的语音助手就是个听写软件。`tools.py` 给了模型 27 个**这台电脑上真会发生**的动作，
+`agent.py` 负责把循环转起来：模型说要调哪个工具 -> 我们真的去调 -> 结果喂回去 -> 它决定下一步。
+
+| 分类 | 能干什么 |
+|---|---|
+| 文件 | 列目录 / 读 / 写 / 精确替换 / 正则搜索 —— 只限一个目录内 |
+| 网页 | 打开网址 / 抓正文 / 联网搜索 |
+| 图片 | 看尺寸 / 缩放 / 裁剪 / 旋转 / 转格式 / 加效果 / 水印 / 缩略图 |
+| 电脑 | 截图 / 移动点击滚轮 / 打字 / 按键 / 列窗口 / 切窗口 / 开程序 |
+| 命令行 | 在工作目录里跑一条命令 |
+
+两条规矩让它不至于变成脚底下的地雷：
+
+- **文件锁死在一个目录里**。工作目录默认是 `我的文档/Siri-OS`，
+  越出这个范围的路径**在碰盘之前**就被拒掉。
+- **风险最高的两类默认关**。鼠标键盘、执行命令各自有独立开关，和总开关并排摆着；
+  文件、网页、图片默认开。
+
+两种协议都实现了 —— 各家写法不一样：OpenAI 兼容后端用 `tool_calls` + `role=tool` 的结果消息，
+Anthropic 系用 `tool_use` 块 + `tool_result` 块。`agent.py` 把两者归一成一种形状，
+再按**回答问题的那家后端**的协议拼下一轮。
+
+有个坑值得抄：**后续那一轮必须回到同一个后端**。`tool_call_id` 是那个模型发的，
+中途换厂商整个对话就接不上了 —— 所以 `LLM.chat_tools(..., backend=...)` 会钉住它。
+
+### 上下文：记得住，也知道屏幕上有什么
+
+两块，互相独立，都能单独关：
+
+- **对话记忆**：最近几轮（1 轮 = 你说一句 + 它答一句）跟着当前问题一起发出去，
+  所以「把它改短一点」才有指代对象。**只存在内存里** —— 不写文件、不进 `config.json`、
+  关掉程序就没了。「清空上下文」是本地指令，根本不经过模型。
+- **电脑状态**：每次请求都带一小段快照 —— 前台窗口、打开的窗口清单、屏幕分辨率、
+  工作目录、当前开了哪些能力。模型真要看屏幕画面可以自己调 `screenshot`，
+  但不必每一轮都付一次截图的代价。
+
+Anthropic 要求 `user` / `assistant` 必须交替，而「历史 + 当前问题」拼起来
+可能出现连续两条 `user` —— 所以发出去之前先整形一遍。
+
+### 单文件，不用装 Python
+
+`build_exe.py` 用 PyInstaller 跑 `siri_os.spec`，产出一个单文件 `Siri-OS.exe`。
+
+打包后有**两套目录**，搞混是最经典的坑：解包目录（`sys._MEIPASS`）是只读的，
+放代码和 `listen.ps1`；**exe 同级目录**是可写的，放 `config.json`、密钥库和日志。
+`paths.py` 是唯一知道这件事的地方 —— `bundle_dir()` 管只读资源，`data_dir()` 管所有要落盘的东西。
+
+打包还要处理的几件事：
+
+- **没有控制台**：`sys.stdout` 被重定向到 `logs/siri_orb.log`，而且必须**行缓冲** ——
+  块缓冲的话，常驻进程永远不退出，缓冲区就永远不刷，日志文件一直是空的
+  （看着像「零异常」，其实什么都没记上）。
+- **没有 `python.exe` 可spawn**：设置窗口就是这个 exe 加 `--settings`。
+- **开机自启**直接指向 exe 自己，不再是 `pythonw + startup.py`。
+- **密钥**在设置面板里填（命令行版 `set_key.py` 要终端才读得到 key）。
 
 ---
 
