@@ -415,6 +415,13 @@ class Overlay(QtWidgets.QWidget):
     def __init__(self, cfg):
         QtWidgets.QWidget.__init__(self)
         self.cfg = cfg
+        # 配置热重载的基线：启动时先记下当前 mtime。
+        # ⚠️ 不记的话，第一次轮询必然被当成「配置变了」-> 每次启动都打一条
+        #    「新的设置已生效」的假消息，看着像有东西在偷偷改配置。
+        try:
+            self._cfg_mtime = os.path.getmtime(CONFIG_PATH)
+        except Exception:
+            self._cfg_mtime = None
         self.level = 0.0          # 平滑后的实际电平
         self.level_target = 0.0   # 最近一次收到的电平
         self.sig_level.connect(self.set_level)
