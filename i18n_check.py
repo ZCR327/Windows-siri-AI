@@ -212,6 +212,77 @@ def _check_new_features():
         ok(False, "字幕字号真的进 QFont", "-> %s" % e)
 
 
+def _check_model_picker():
+    """模型下拉：清单要全、默认值要在清单里、面板上还得有「拉取最新」。
+
+    这三份清单是实测出来的（服务端 /models + 逐个真实请求验活），
+    所以这里断言的是「清单长度 + 面板渲染 + 默认值合法」，不是具体某几个名字。
+    """
+    import llm as llm_mod
+    ok(hasattr(cfgstore, "MODEL_CHOICES"), "cfgstore 有 MODEL_CHOICES")
+    ok(set(cfgstore.MODEL_CHOICES) == {"minimax", "deepseek", "zhipu"},
+       "三家服务商都有模型清单")
+    total = 0
+    for prov, lst in cfgstore.MODEL_CHOICES.items():
+        total += len(lst)
+        ok(len(lst) >= 5, "%s 模型数 >= 5" % prov, "-> %d" % len(lst))
+        ok(len(set(lst)) == len(lst), "%s 清单无重复" % prov)
+        ok(all(isinstance(m, str) and m.strip() for m in lst),
+           "%s 清单全是非空字符串" % prov)
+    ok(total >= 20, "三个后端加起来 >= 20 个模型", "-> %d" % total)
+
+    for spec in cfgstore.SPEC:
+        prov = spec.get("provider")
+        if not prov:
+            continue
+        ok(spec["type"] == "choice", "%s 是下拉" % spec["key"])
+        ok(spec.get("choices") == cfgstore.MODEL_CHOICES.get(prov),
+           "%s 下拉内容 == 清单" % spec["key"])
+        ok(spec.get("editable") is True, "%s 允许手输清单外的模型" % spec["key"])
+        d = cfgstore.get_path(cfgstore.DEFAULTS, spec["key"])
+        ok(d in cfgstore.MODEL_CHOICES[prov], "%s 默认值在清单里" % spec["key"],
+           "-> %r" % d)
+
+    ok(hasattr(llm_mod, "list_models"), "llm 有 list_models()")
+    ok(set(getattr(llm_mod, "MODELS_URL", {})) == {"minimax", "deepseek", "zhipu"},
+       "llm 三个 /models 地址都在")
+    try:
+        models, err = llm_mod.list_models("deepseek")
+        if models:
+            ok(len(models) >= 2, "DeepSeek /models 拉到 >= 2 个模型", "-> %d" % len(models))
+        else:
+            ok(True, "DeepSeek /models 本次没拉到（离线可跳过）", "-> %s" % err)
+    except Exception as e:
+        ok(True, "list_models 调用异常（离线可跳过）", "-> %s" % e)
+
+    # 面板上：三个模型行都要有「拉取最新」按钮，且下拉里的项 == 清单
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5 import QtWidgets
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    import settings as S
+    S.SettingsDialog._backend_check = lambda self: None
+    dlg = S.SettingsDialog()
+    try:
+        want = i18n.t("zh", "settings.models.refresh")
+        nbtn = len([b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text() == want])
+        ok(nbtn == 3, "模型下拉旁有 3 个「拉取最新」按钮", "-> %d" % nbtn)
+        combos = 0
+        for spec, ctrl in dlg.rows:
+            prov = spec.get("provider")
+            if not prov:
+                continue
+            combos += 1
+            got = [ctrl.itemText(i) for i in range(ctrl.count())]
+            ok(got == cfgstore.MODEL_CHOICES[prov],
+               "%s 下拉里的项 == 清单" % spec["key"], "-> %d 项" % len(got))
+        ok(combos == 3, "面板上有 3 个模型下拉", "-> %d" % combos)
+    finally:
+        try:
+            dlg.hide()
+        except Exception:
+            pass
+
+
 def main():
     sec("1. SPEC 字段完整性（每个旋钮都要有英文）")
     for spec in cfgstore.SPEC:
@@ -351,6 +422,12 @@ def main():
         _check_new_features()
     except Exception as e:
         ok(False, "新功能回归检查跑起来了", "-> %s" % e)
+
+    sec("14. 模型选择器（清单 / 下拉 / 拉取最新）")
+    try:
+        _check_model_picker()
+    except Exception as e:
+        ok(False, "模型选择器回归检查跑起来了", "-> %s" % e)
 
     print("\n%d checks, %d FAIL" % (CHECKS[0], len(FAILS)))
     if FAILS:

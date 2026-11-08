@@ -191,6 +191,8 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 - **开机自启 / 托盘图标**：在「系统」页签里直接切；开机自启用启动文件夹快捷方式（当前用户级，不要管理员权限）。
 - **一键恢复**：底部「恢复推荐配置」把所有旋钮拉回推荐值（**不动密钥库里的 key**）。
 - **首次运行零配置**：clone 下来直接跑，第一次运行自动生成 `config.json`。
+- **选模型**：三个后端各自的下拉里列了该家**全部实测可用的模型**（MiniMax 9 个 / DeepSeek 5 个 / 智谱 16 个），
+  可以手输清单外的模型名；旁边的「拉取最新」直接问服务商的 `/models` 端点现场刷新。
 
 ### 几个值得抄的设计
 
@@ -243,6 +245,7 @@ install_autostart.py  当前用户级开机自启（不需要管理员权限）
 | `ui_lang` / `reply_lang` | `zh` / `zh` | 见上 |
 | `llm.order` | `minimax, deepseek, zhipu` | 后端优先级 |
 | `llm.enabled.*` | 三个都是 `true` | 逐个开关后端；关掉的**根本不建**，一次请求都不发 |
+| `llm.minimax_model` / `llm.deepseek_model` / `llm.zhipu_model` | 见下拉 | 选哪个模型；下拉是**实测可用的全集**，也能手输清单外的名字 |
 | `glow_intensity` | `1.0` | 边光亮度上限（调低更含蓄） |
 | `caption_font_size` | `14` | 字幕卡正文字号 |
 | `show_tray_icon` | `true` | 托盘图标（关掉就没有设置入口） |

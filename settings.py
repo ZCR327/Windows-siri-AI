@@ -529,7 +529,19 @@ class SettingsDialog(QtWidgets.QDialog):
             ctrl.changed.connect(self._on_change)
         else:
             ctrl = QtWidgets.QLabel("-")
-        lay.addWidget(ctrl)
+        if spec.get("provider") and t == "choice":
+            # 模型下拉旁边挂一个「拉取最新」按钮 —— 新模型上线不用等发版
+            brow = QtWidgets.QHBoxLayout()
+            brow.setContentsMargins(0, 0, 0, 0)
+            brow.setSpacing(8)
+            brow.addWidget(ctrl, 1)
+            btn = QtWidgets.QPushButton(self.T("settings.models.refresh"))
+            btn.setToolTip(self.T("settings.models.refresh.tip"))
+            btn.clicked.connect(lambda _c=False, sp=spec, c=ctrl: self._refresh_models(sp, c))
+            brow.addWidget(btn)
+            lay.addLayout(brow)
+        else:
+            lay.addWidget(ctrl)
 
         hint = self._spec_text(spec, "hint", "en_hint")
         if hint:
@@ -548,6 +560,14 @@ class SettingsDialog(QtWidgets.QDialog):
             if idx >= 0:
                 ctrl.setCurrentIndex(idx)
             return
+        # 可编辑的下拉（模型名）：**先按值定位到对应项**，这样展开时高亮的是当前模型，
+        # 而不是第 1 项；清单里没有（用户手输过的）再回填纯文本。
+        if spec.get("editable"):
+            idx = ctrl.findText(str(value if value is not None else ""),
+                                QtCore.Qt.MatchFixedString)
+            if idx >= 0:
+                ctrl.setCurrentIndex(idx)
+                return
         ctrl.setCurrentText(str(value if value is not None else ""))
 
     def _make_backend_box(self):
@@ -580,6 +600,47 @@ class SettingsDialog(QtWidgets.QDialog):
         except Exception:
             pass
         QtCore.QTimer.singleShot(0, self._rebuild_for_lang)
+
+    def _refresh_models(self, spec, ctrl):
+        """从服务商自己的 /models 端点拉一份当前可用清单，填进下拉框。
+
+        拉失败**不动现有列表** —— 宁可少几个，也不要把用户能用的清掉。
+        """
+        prov = spec.get("provider")
+        try:
+            import llm as llm_mod
+            models, err = llm_mod.list_models(prov)
+        except Exception as e:
+            models, err = [], str(e)
+        if not models:
+            self._set_status(self.T("settings.models.refresh_failed") % (err or "?"))
+            return
+        cur = ctrl.currentText().strip()
+        # **并集**，不是整表替换：服务端列表可能不含还能调通的旧别名
+        # （DeepSeek 的 chat / reasoner / coder 就不在 /models 里，但照样能用）。
+        # 整表替换会把用户能用的模型抹掉 —— 宁可多列几个，不可少列。
+        have = [ctrl.itemText(i) for i in range(ctrl.count())]
+        merged = list(have)
+        added = 0
+        for m in models:
+            if m not in merged:
+                merged.append(m)
+                added += 1
+        if cur and cur not in merged:
+            merged.append(cur)              # 保留用户手输的模型名
+        ctrl.blockSignals(True)
+        try:
+            ctrl.clear()
+            for m in merged:
+                ctrl.addItem(m)
+            idx = ctrl.findText(cur, QtCore.Qt.MatchFixedString) if cur else -1
+            if idx >= 0:
+                ctrl.setCurrentIndex(idx)      # 高亮仍然是当前模型
+            else:
+                ctrl.setCurrentText(cur)
+        finally:
+            ctrl.blockSignals(False)
+        self._set_status(self.T("settings.models.refreshed") % (len(models), len(merged), added))
 
     def _rebuild_for_lang(self):
         keep = None

@@ -229,6 +229,57 @@ class ZhipuBackend(OpenAIBackend):
                                timeout=timeout, store_name="zhipu", env="ZHIPU_API_KEY")
 
 
+MODELS_URL = {
+    "minimax": "https://api.minimaxi.com/v1/models",
+    "deepseek": "https://api.deepseek.com/models",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4/models",
+}
+
+
+def list_models(provider, api_key=None, timeout=20):
+    """从服务商自己的 /models 端点拉一份当前可用的模型清单。
+
+    返回 (models, error)：models 是模型 id 列表，失败时是空列表 + 原因。
+    面板上「拉取最新」按钮用它 —— 新模型上线不用等发版。
+    """
+    if requests is None:
+        return [], "requests module missing"
+    url = MODELS_URL.get(provider)
+    if not url:
+        return [], "unknown provider: %s" % provider
+    key = api_key
+    if not key and keylib is not None:
+        try:
+            key = keylib.get(provider)
+        except Exception:
+            key = None
+    if not key:
+        return [], "no api key for %s" % provider
+    headers = {"authorization": "Bearer " + key, "content-type": "application/json"}
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout)
+    except Exception as e:
+        return [], str(e)
+    if r.status_code != 200:
+        return [], "HTTP %s" % r.status_code
+    try:
+        j = r.json()
+    except Exception:
+        return [], "bad json"
+    data = j.get("data") if isinstance(j, dict) else None
+    if not isinstance(data, list):
+        return [], "unexpected payload"
+    out = []
+    for it in data:
+        if isinstance(it, dict):
+            mid = it.get("id") or it.get("name") or it.get("model")
+            if mid:
+                out.append(str(mid))
+        elif it:
+            out.append(str(it))
+    return sorted(set(out)), ""
+
+
 class LLM(object):
     """按配置顺序串行尝试各后端，第一个成功的返回。
 

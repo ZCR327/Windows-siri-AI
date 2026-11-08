@@ -212,6 +212,9 @@ What the panel can do now:
 - **Reset to recommended** - one button puts every knob back to its recommended value
   (**the key store is left alone**).
 - **Zero-config first run** - clone it, run it, and `config.json` is created for you.
+- **Pick a model** - each backend's dropdown lists every model of that provider that
+  actually works (9 MiniMax / 5 DeepSeek / 16 Zhipu), you can still type a name that is
+  not in the list, and "Refresh" asks the provider's `/models` endpoint for the current set.
 
 ### Design notes worth stealing
 
@@ -274,6 +277,7 @@ window. Highlights:
 | `ui_lang` / `reply_lang` | `zh` / `zh` | see above |
 | `llm.order` | `minimax, deepseek, zhipu` | backend priority |
 | `llm.enabled.*` | all `true` | per-backend switches; a disabled backend is never built |
+| `llm.minimax_model` / `llm.deepseek_model` / `llm.zhipu_model` | see the dropdown | which model to use; the dropdown holds the full measured set and accepts a typed name |
 | `glow_intensity` | `1.0` | upper bound on the glow brightness (lower = subtler) |
 | `caption_font_size` | `14` | font size of the caption card body text |
 | `show_tray_icon` | `true` | tray icon (off means no settings entry point) |

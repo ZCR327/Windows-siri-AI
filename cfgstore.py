@@ -97,6 +97,31 @@ DEFAULTS = {
 }
 
 
+MODEL_CHOICES = {
+    # 这三份清单是**实测出来的**，不是抄文档：
+    #   1) 用本机密钥打三家 API 自己的 /models 端点，拿到官方在售列表；
+    #   2) 再逐个发真实请求验活，剔掉调不通的：
+    #      glm-4-alltools 只支持异步调用（本助手是同步链），
+    #      glm-z1 本账户无权限，deepseek-v3.2-exp 服务端已下线。
+    # 新模型上线后在面板里点「拉取最新」就能现场刷新，不用等发版。
+    "minimax": [
+        "MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed",
+        "MiniMax-M2",
+    ],
+    "deepseek": [
+        "deepseek-v4-pro", "deepseek-flash", "deepseek-chat",
+        "deepseek-reasoner", "deepseek-coder",
+    ],
+    "zhipu": [
+        "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx", "glm-5.3-flashx-legal",
+        "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-5",
+        "glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4-flash",
+        "glm-4-plus", "glm-4-air", "glm-4v-plus",
+    ],
+}
+
+
 # ------------------------------------------------------------ 旋钮的数据描述
 # key 用点号路径；列表下标写成 glow_origin[0]
 # type: float / int / bool / text / textlong / choice / order
@@ -223,19 +248,21 @@ SPEC = [
      "hint": "填了会写进密钥库（config/api_keys.json，不进版本库）；留空表示不修改现有 key。",
      "en_hint": "If filled it is written to the key store (config/api_keys.json, never committed). Leave blank to keep the current key."},
     {"key": "llm.minimax_model", "tab": "模型", "label": "MiniMax 模型", "en_label": "MiniMax model",
-     "type": "choice",
-     "choices": ["MiniMax-M3.1-Flash", "MiniMax-M2.5", "MiniMax-M2.1", "MiniMax-Text-01"],
+     "type": "choice", "provider": "minimax",
+     "choices": MODEL_CHOICES["minimax"],
      "editable": True,
-     "hint": "国内站 api.minimaxi.com。可以自己输入库里没有的模型名。",
-     "en_hint": "China site api.minimaxi.com. You can type a model name that is not in the list."},
+     "hint": "国内站 api.minimaxi.com。清单是实测出来的（服务端 /models + 逐个验活）；可以自己输入清单里没有的模型名。",
+     "en_hint": "China site api.minimaxi.com. The list was measured (server /models plus a live call per model); you can still type a name that is not in it."},
     {"key": "llm.deepseek_model", "tab": "模型", "label": "DeepSeek 模型", "en_label": "DeepSeek model",
-     "type": "choice", "choices": ["deepseek-chat", "deepseek-reasoner"], "editable": True,
-     "hint": "DeepSeek 的模型名。",
-     "en_hint": "The DeepSeek model name."},
+     "type": "choice", "provider": "deepseek",
+     "choices": MODEL_CHOICES["deepseek"], "editable": True,
+     "hint": "DeepSeek 的模型名。v4-pro / flash 是官方在售的，chat / reasoner / coder 是还能调通的旧别名。",
+     "en_hint": "DeepSeek model names. v4-pro and flash are the current ones; chat, reasoner and coder are older aliases that still work."},
     {"key": "llm.zhipu_model", "tab": "模型", "label": "智谱 GLM 模型", "en_label": "Zhipu GLM model",
-     "type": "choice", "choices": ["glm-4-flash", "glm-4-plus", "glm-4"], "editable": True,
-     "hint": "智谱的模型名。",
-     "en_hint": "The Zhipu model name."},
+     "type": "choice", "provider": "zhipu",
+     "choices": MODEL_CHOICES["zhipu"], "editable": True,
+     "hint": "智谱的模型名。5.x 是新一代，4.x 系列仍可用。",
+     "en_hint": "Zhipu model names. 5.x is the new generation; the 4.x series still works."},
     {"key": "system_prompt", "tab": "模型", "label": "系统提示词", "en_label": "System prompt",
      "type": "textlong",
      "hint": "它决定助手的说话风格。语言规则会按「回复语言」另外追加，不用自己写语言要求。",
