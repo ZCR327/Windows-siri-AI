@@ -270,7 +270,20 @@ def _check_model_picker():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     import settings as S
     S.SettingsDialog._backend_check = lambda self: None
-    dlg = S.SettingsDialog()
+    # 断言按中文标签找东西 -> 必须**强制中文界面**，否则发布副本里
+    # make_release_images 留下的 ui_lang=en 的 config.json 会让断言全挂。
+    _orig_load = cfgstore.load
+
+    def _load_zh(path=None):
+        c = _orig_load(path)
+        c["ui_lang"] = "zh"
+        return c
+
+    cfgstore.load = _load_zh
+    try:
+        dlg = S.SettingsDialog()
+    finally:
+        cfgstore.load = _orig_load
     try:
         want = i18n.t("zh", "settings.models.refresh")
         nbtn = len([b for b in dlg.findChildren(QtWidgets.QPushButton) if b.text() == want])
