@@ -643,6 +643,11 @@ def main():
     zh_part, en_part = i18n.split_bilingual("中文：你好\n\nEnglish: Hello there")
     ok("你好" in zh_part, "拆出中文段", "-> %r" % zh_part)
     ok("Hello" in en_part, "拆出英文段", "-> %r" % en_part)
+    ok(i18n.looks_bilingual("中文：你好\n\nEnglish: Hello there"),
+       "带「中文：/ English:」标记的是真双语")
+    ok(not i18n.looks_bilingual("第一步，先把目录建出来\nStep 2: run the command"),
+       "混排的多步骤回答不算真双语（要整段念）")
+    ok(not i18n.looks_bilingual("纯中文的一段回答。"), "纯中文不算双语")
 
     sec("9. 听写语言：auto 展开成两种、崩溃不重试")
     i18n.set_last_stt_lang("en-US")

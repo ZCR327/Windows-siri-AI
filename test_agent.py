@@ -26,6 +26,7 @@ if HERE not in sys.path:
 import context as ctx_mod
 import agent as agent_mod
 import llm as llm_mod
+import tools as tool_mod
 
 FAILS = []
 CHECKS = [0]
@@ -246,10 +247,52 @@ def check_http():
         srv.shutdown()
 
 
+# ------------------------------------------- 4. 轮次用光 / 工作目录自建
+PREAMBLE = "我先去看看文件内容。"
+SUMMARY = "总结：文件已经列出来了，一共 3 个。"
+
+
+class _FakeLoopLLM(object):
+    """每轮只回一句开场白 + 一个工具调用（模拟「永远干不完」的多步骤任务）。"""
+
+    def chat_tools(self, messages, tools=None, system=None, max_tokens=1024,
+                   temperature=0.6, backend=None):
+        return {"backend": "fake", "protocol": "openai", "text": PREAMBLE,
+                "tool_calls": [{"id": "1", "name": "no_such_tool", "arguments": {}}]}
+
+    def chat(self, messages, system=None, max_tokens=1024, temperature=0.6):
+        return SUMMARY
+
+
+def check_rounds():
+    sec("4. 轮次用光不能拿开场白当答案")
+    cfg = {"agent": {"enabled": True, "max_rounds": 3, "allow_shell": False,
+                     "allow_screen": False, "work_dir": ""}}
+    ag = agent_mod.Agent(cfg, _FakeLoopLLM())
+    out = ag.run("列出文件") or ""
+    ok(out != PREAMBLE, "没有把中途的开场白当答案", "-> %r" % out)
+    ok(SUMMARY in out, "返回的是补问出来的总结", "-> %r" % out)
+
+
+def check_work_dir():
+    sec("5. 工作目录会自动建出来")
+    tmp = tempfile.mkdtemp(prefix="siri-wd-")
+    try:
+        cfg = {"agent": {"enabled": True, "work_dir": os.path.join(tmp, "Siri-OS")}}
+        base = tool_mod.work_dir(cfg)
+        ok(not os.path.isdir(base), "一开始目录不存在")
+        tool_mod.ensure_work_dir(cfg)
+        ok(os.path.isdir(base), "ensure_work_dir 之后目录在了")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     check_memory()
     check_loop()
     check_http()
+    check_rounds()
+    check_work_dir()
     print("")
     print("%d checks, %d FAIL" % (CHECKS[0], len(FAILS)))
     if FAILS:

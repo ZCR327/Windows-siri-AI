@@ -70,6 +70,23 @@ def work_dir(cfg):
     return os.path.abspath(os.path.expanduser(d))
 
 
+def ensure_work_dir(cfg):
+    """确保工作目录存在 —— 目录不存在的话，**每条命令都会因为 cwd 不存在而失败**。
+
+    ⚠️ 本机踩过（2026-11-08）：默认工作目录是「我的文档/Siri-OS」，
+    那台机器上 Documents 在、但 Siri-OS 子目录从来没被创建过（或者被删了）
+    → subprocess.run(cwd=...) 直接报「目录名称无效」
+    → 模型以为是自己命令写错，反复换写法重试 → 轮次被烧光
+    → 用户最后只听到一句「我先去看看」就没了。
+    """
+    base = work_dir(cfg)
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return base
+
+
 def _safe_path(cfg, path, must_exist=False):
     """把模型给的路径解析成**工作目录内**的绝对路径；越界就拒绝。"""
     base = work_dir(cfg)
@@ -705,7 +722,8 @@ def t_run_command(args, cfg):
         raise ToolError("缺少 command 参数")
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                           timeout=int(args.get("timeout") or 60), cwd=work_dir(cfg))
+                           timeout=int(args.get("timeout") or 60),
+                           cwd=ensure_work_dir(cfg))
     except Exception as e:
         raise ToolError("执行失败：%s" % e)
     out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
@@ -918,6 +936,9 @@ def execute(name, args, cfg):
         return "「%s」这个能力现在是关闭的（%s），请先在设置面板里打开。" % (
             name, CAT_LABEL.get(spec["category"], spec["category"]))
     try:
+        # 文件/命令类工具都拿工作目录当根 —— 先把它建出来
+        if spec["category"] in ("file", "shell"):
+            ensure_work_dir(cfg)
         r = spec["fn"](args or {}, cfg)
         return r if isinstance(r, str) else str(r)
     except ToolError as e:

@@ -199,6 +199,22 @@ def split_bilingual(text):
     return "\n".join(zh), "\n".join(en)
 
 
+# 真双语回复的标记 —— 只有带这些标记的才是「一段中文 + 一段英文」
+_BILINGUAL_MARKERS = ("中文：", "中文:", "english:", "english：")
+
+
+def looks_bilingual(text):
+    """这段文字是不是**真双语**（一段中文 + 一段英文的那种）。
+
+    ⚠️ 为什么要单独判：播报时中文声线只念中文段。
+    以前只要「有非汉字的行」就丢给英文段 —— 多步骤回答里夹的那一行英文
+    会被整行丢掉，用户听着就是「说了一句就没了」。
+    真双语的约定是带「中文：/ English:」标记的，所以这里只看标记。
+    """
+    low = (text or "").lower()
+    return any(m in low for m in _BILINGUAL_MARKERS)
+
+
 def build_system_prompt(cfg):
     """基础提示词（语言中性）+ 按回复语言追加的语言规则。"""
     cfg = cfg or {}

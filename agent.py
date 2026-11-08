@@ -38,6 +38,11 @@ except Exception:      # pragma: no cover
 
 NL = chr(10)
 
+# 轮次用光时追问的那句话 —— 让模型把已经做的事**交代清楚**，
+# 而不是把中途的开场白当答案（用户只听到「我先去看看」就没了）。
+_SUMMARY_ASK = ("别再调用工具了。现在只用一两句话回答：刚才实际做了什么、结果是什么；"
+                "如果还没做完，就直接说卡在哪一步、下一步该怎么走。")
+
 
 def _t(cfg, key, default=""):
     """取一条界面文案（取不到就用默认值，别让文案问题打断对话）。"""
@@ -125,10 +130,32 @@ class Agent(object):
             if rtext:
                 last = rtext
             if not calls:
-                return rtext or last
+                if rtext:
+                    return rtext
+                # 模型这一轮什么都没说 —— 补一轮总结，别拿空话当答案
+                return self._summarize(messages, system) or last
             self._append_assistant(messages, proto, rtext, calls)
             self._run_calls(messages, proto, calls)
-        return last
+        # ⚠️ 轮次用光：**不能把中途的开场白当答案** ——
+        #    「我先去看看文件」这种话对用户等于「说第一句就没了」。
+        #    补一轮**不带工具**的总结，让他听到一个完整的交代。
+        return self._summarize(messages, system) or last
+
+    def _summarize(self, messages, system):
+        """补一轮**不带工具**的总结（轮次用光 / 模型没给正文时用）。"""
+        try:
+            msgs = list(messages) + [{"role": "user", "content": _SUMMARY_ASK}]
+            if ctx_mod is not None:
+                try:
+                    msgs = ctx_mod.normalize_roles(msgs)
+                except Exception:
+                    pass
+            out = self.llm.chat(msgs, system=system)
+            if out and str(out).strip():
+                return str(out).strip()
+        except Exception:
+            pass
+        return ""
 
     # ---------------------------------------------------------------- 内部
     @staticmethod

@@ -776,7 +776,9 @@ class Overlay(QtWidgets.QWidget):
         f = QtGui.QFont("Microsoft YaHei UI", fs if pos == "top" else max(9, fs - 3))
         fm = QtGui.QFontMetrics(f)
         maxw = int(self.cfg.get("caption_max_width", 760))
-        br = fm.boundingRect(QtCore.QRect(0, 0, maxw, 400),
+        # ⚠️ 高度上限别卡太死：多步骤任务的回答本来就长，
+        #    卡死了卡片就只显示中间那一段（用户看到「只展示一点」）。
+        br = fm.boundingRect(QtCore.QRect(0, 0, maxw, 900),
                              int(QtCore.Qt.TextWordWrap), self.caption)
         label = i18n.state_text(i18n.ui_lang(self.cfg), self.state)
         label_h = 24 if label else 0
@@ -830,8 +832,9 @@ class Overlay(QtWidgets.QWidget):
         if draw_body:
             p.setFont(f)
             p.setPen(QtGui.QColor(238, 238, 245))
+            # 顶对齐：实在放不下时显示**开头**（顶对齐显示中间那段更没用）
             p.drawText(rect.adjusted(28, 18 + label_h, -28, -14),
-                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter | QtCore.Qt.TextWordWrap,
+                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
                        self.caption)
 
 

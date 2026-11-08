@@ -213,6 +213,11 @@ class Speaker(object):
         lang=zh   -> 用中文声线念中文段
         lang=en   -> 用英文声线念英文段
         lang=both -> 不换声线，按当前声线的语言挑一段念（两段都显示在卡片上）
+
+        ⚠️ 只有**真双语**（带「中文：/ English:」标记）才挑一段念；
+        普通回答——哪怕中英混排——**整段念**。
+        以前按「这一行有没有汉字」拆，多步骤回答里夹的那一行英文会被整行丢掉，
+        用户听着就是「说第一句就没了」。
         """
         if not text:
             return
@@ -220,7 +225,7 @@ class Speaker(object):
         want = (lang or "zh").lower()
         if want == "both":
             want = self._lang_of(self._desc()) or "zh"
-        if want in ("zh", "en"):
+        if want in ("zh", "en") and i18n.looks_bilingual(text):
             cur = self._lang_of(self._desc())
             if cur and cur != want:
                 if self._pick_by_lang(want):
