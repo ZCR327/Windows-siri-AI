@@ -207,7 +207,7 @@ DEFAULTS = {
     # stt.mode: winh = 走 Windows 自带语音输入（Win+H）；offline = 本机 System.Speech
     "stt": {"timeout_sec": 10, "language": "auto", "mode": "winh",
             "hide_panel": True, "mute_start_sound": True, "mute_seconds": 1.8,
-            "hide_seconds": 3.0},
+            "hide_max_seconds": 120.0},
     "tts": {"voice_hint": "Huihui", "rate": 0},
     # ⚠️ 语言中性：只说「你是谁、怎么说话」，不说用哪种语言 ——
     #    语言规则由 i18n.LANG_RULES 按 reply_lang 追加，用户改这段也不会失效。

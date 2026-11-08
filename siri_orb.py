@@ -1176,7 +1176,7 @@ def _begin_winh(overlay, card):
         # 语音输入面板 / 提示卡：Windows 自己的 UI，没有官方开关，只能自己藏
         if stt_cfg.get("hide_panel", True):
             winh_mod.suppress_voice_ui(
-                float(stt_cfg.get("hide_seconds", 3.0) or 3.0),
+                max_seconds=float(stt_cfg.get("hide_max_seconds", 120.0) or 120.0),
                 on_hide=lambda info: _trace("suppress_voice_ui: hid " + info))
         _trace("_begin_winh: Win+H singleShot armed")
 

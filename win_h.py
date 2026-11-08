@@ -230,44 +230,421 @@ def is_voice_ui(hwnd, pid, cls, title, my_pid=None, was_visible=False):
         return False
 
 
-def suppress_voice_ui(duration=3.0, interval=0.12, on_hide=None):
-    """Win+H 之后把语音输入 UI 藏起来（后台线程轮询，面板是异步弹出的）。
+def suppress_voice_ui(max_seconds=None, interval=0.05, on_hide=None):
+    """Win+H 之后把语音输入 UI 藏起来（藏到语音会话结束为止）。
 
-    on_hide: 每藏掉一个窗口回调一次（留痕用），参数是描述串。
+    面板那扇窗是外壳 ApplicationFrameWindow 的**子窗口**，EnumWindows 看不见，
+    只能靠 EnumChildWindows(GetDesktopWindow()) 找到。
+    判定：外壳托管 + **触发之后新冒出来**的小窗。
+    触发前就在的那扇（输入法自己的）一个都不碰 —— 藏了中文输入就废了。
+
+    on_hide: 每藏掉一扇窗回调一次（留痕），参数是描述串。
     """
     import threading
     u = ctypes.windll.user32
     my_pid = os.getpid()
+    limit = float(max_seconds if max_seconds is not None else _VOICE_MAX_HIDE_SEC)
 
-    before = set()
-    try:
-        for (h, pid, cls, title) in _iter_windows():
-            if u.IsWindowVisible(h):
-                before.add(h)
-    except Exception:
-        pass
+    # 触发前先拍一张可见窗口快照（给提示卡那条老规则用）
+    visible_before = set()
+    for (h, pid, cls, title) in _iter_windows():
+        if u.IsWindowVisible(h):
+            visible_before.add(h)
 
     def run():
-        end = time.time() + max(0.5, float(duration or 3.0))
+        hidden = []
+        panel = None
+        panel_host = None
+        end = time.time() + limit
+        idle_since = None
+        session_seen = False
+        tick = 0
         while time.time() < end:
+            tick += 1
             try:
-                for (h, pid, cls, title) in _iter_windows():
-                    if not u.IsWindowVisible(h):
-                        continue
-                    if is_voice_ui(h, pid, cls, title, my_pid, h in before):
-                        try:
+                # 1) 语音面板：认准那扇画着蓝按钮的窗，然后一直按住藏
+                #    （面板那扇窗是**复用的**，触发前就存在，所以不能靠
+                #     「新冒出来」判断；靠的是「矩形里有那颗蓝按钮」）
+                if panel is None:
+                    panel, panel_host = _find_voice_panel_window()
+                    if panel:
+                        hidden.append((panel, panel_host))
+                        if on_hide:
+                            on_hide("panel hwnd=%s host=%r" % (panel, panel_host))
+                for (h, pcls) in list(hidden):
+                    try:
+                        if u.IsWindow(h) and u.IsWindowVisible(h):
+                            u.ShowWindow(h, _SW_HIDE)
+                    except Exception:
+                        pass
+                # 2) 其它语音 UI（提示卡等）—— 老规则，**低频**扫
+                #    （EnumWindows + 取窗口标题很贵，10Hz 全量扫会把面板探测拖慢）
+                if tick % 5 == 1:
+                    for (h, pid, cls, title) in _iter_windows():
+                        if not u.IsWindowVisible(h):
+                            continue
+                        if is_voice_ui(h, pid, cls, title, my_pid, h in visible_before):
                             u.ShowWindow(h, _SW_HIDE)
                             if on_hide:
-                                on_hide("hwnd=%s cls=%r title=%r pid=%s" % (h, cls, title, pid))
-                        except Exception:
-                            pass
+                                on_hide("ui hwnd=%s cls=%r title=%r" % (h, cls, title))
             except Exception:
                 pass
+            # 语音会话结束就收工（会话不 Active 且静默一会儿）
+            # ⚠️ 语音会话**没起来过**的时候不能急着收工 ——
+            #    面板比会话晚半秒到，收早了等于没藏。
+            if tick % 4 == 0:
+                if _voice_session_active():
+                    session_seen = True
+                    idle_since = None
+                else:
+                    now = time.time()
+                    if idle_since is None:
+                        idle_since = now
+                    elif session_seen:
+                        if now - idle_since > _VOICE_IDLE_SEC:
+                            break
+                    elif now - idle_since > _VOICE_WAIT_SEC:
+                        break
             time.sleep(interval)
+        # 收工：把藏起来的窗放回去
+        for (h, pcls) in hidden:
+            try:
+                if u.IsWindow(h):
+                    u.ShowWindow(h, 5)   # SW_SHOW
+            except Exception:
+                pass
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
     return t
+
+
+# ---------------------------------------------------------------- 语音输入面板（实测结论）
+
+# ⚠️ 这台机器上 Win+H 的语音面板**不是一个能枚举到的顶层窗口**，找它踩了一整天：
+#   - 外壳：explorer.exe 的 ApplicationFrameWindow，rect=(640,702,160,102)
+#   - 渲染层：textinputhost.exe 的 CoreWindow「Windows 输入体验」，
+#     **它是外壳的子窗口**，所以 EnumWindows / FindWindowEx 都看不见；
+#     只有 EnumChildWindows(GetDesktopWindow()) 能摸到（它枚举桌面下所有后代）。
+#   - 藏 TextInputHost 那个**全屏** CoreWindow（1440x900，输入法宿主）**没用** ——
+#     面板是另一扇小窗，实测藏它像素从 6895 → 291（面板真的没了）。
+#
+# 规则：只藏「触发之后新冒出来、且由外壳 ApplicationFrameWindow 托管的小窗」。
+# 触发前就存在的那扇小窗（输入法自己的）**一个都不碰** —— 藏了中文输入就废了。
+
+_VOICE_PANEL_PROC = "textinputhost.exe"
+_VOICE_PANEL_CLASS = "Windows.UI.Core.CoreWindow"
+_VOICE_PANEL_HOST_CLASS = "ApplicationFrameWindow"
+_VOICE_PANEL_MAX_W = 700
+_VOICE_PANEL_MAX_H = 500
+_VOICE_MAX_HIDE_SEC = 120.0
+_VOICE_IDLE_SEC = 2.0       # 语音会话静默多久就认为面板已经收工
+_VOICE_WAIT_SEC = 12.0      # 语音会话一直没起来（Win+H 失败）-> 等多久就放弃
+
+
+# ------------------------------------------------------- 坐标空间自校准（DPI 坑）
+#
+# ⚠️ 这台机器上踩过的最隐蔽的一个坑（2026-11-08 实测定位）：
+#   GetWindowRect 返回的坐标**空间取决于调用进程的 DPI 感知**：
+#     - DPI-unaware（普通 python.exe）        -> 逻辑坐标 1440x900
+#     - per-monitor aware（PyQt5/PyInstaller）-> 物理坐标 2880x1800
+#   而 ImageGrab.grab() **永远**是物理像素。
+#   早先按 GetDpiForWindow/96 生乘，在 app 里等于多乘一倍，
+#   截到屏幕外面去 -> 蓝按钮像素恒为 0 -> 面板永远认不出来 -> 面板永远藏不掉。
+#   （源码级自检是在 DPI-unaware 的 python.exe 里跑的，所以一直是绿的 —— 同一个 bug，
+#     只有打包成 app 才会犯。这正是「必须在装好的 exe 上验收」的典型例子。）
+#
+# 正确做法：**不猜**，用「物理屏幕尺寸 / 本进程 GetSystemMetrics 尺寸」自校准。
+#   DPI-unaware：2880/1440 = 2.0（逻辑 -> 物理）
+#   per-monitor：2880/2880 = 1.0（本来就是物理）
+# 两种模式都实测过（蓝像素 1693 / 1678，判据一致）。
+
+class _DEVMODEW(ctypes.Structure):
+    """EnumDisplaySettingsW 要的 DEVMODEW（只要用到显示模式那几个字段）。"""
+    _fields_ = [
+        ("dmDeviceName", ctypes.c_wchar * 32),
+        ("dmSpecVersion", ctypes.c_ushort),
+        ("dmDriverVersion", ctypes.c_ushort),
+        ("dmSize", ctypes.c_ushort),
+        ("dmDriverExtra", ctypes.c_ushort),
+        ("dmFields", ctypes.c_ulong),
+        ("dmOrientation", ctypes.c_short),
+        ("dmPaperSize", ctypes.c_short),
+        ("dmPaperLength", ctypes.c_short),
+        ("dmPaperWidth", ctypes.c_short),
+        ("dmScale", ctypes.c_short),
+        ("dmCopies", ctypes.c_short),
+        ("dmDefaultSource", ctypes.c_short),
+        ("dmPrintQuality", ctypes.c_short),
+        ("dmColor", ctypes.c_short),
+        ("dmDuplex", ctypes.c_short),
+        ("dmYResolution", ctypes.c_short),
+        ("dmTTOption", ctypes.c_short),
+        ("dmCollate", ctypes.c_short),
+        ("dmFormName", ctypes.c_wchar * 32),
+        ("dmLogPixels", ctypes.c_ushort),
+        ("dmBitsPerPel", ctypes.c_ulong),
+        ("dmPelsWidth", ctypes.c_ulong),
+        ("dmPelsHeight", ctypes.c_ulong),
+        ("dmDisplayFlags", ctypes.c_ulong),
+        ("dmDisplayFrequency", ctypes.c_ulong),
+        ("dmICMMethod", ctypes.c_ulong),
+        ("dmICMIntent", ctypes.c_ulong),
+        ("dmMediaType", ctypes.c_ulong),
+        ("dmDitherType", ctypes.c_ulong),
+        ("dmReserved1", ctypes.c_ulong),
+        ("dmReserved2", ctypes.c_ulong),
+        ("dmPanningWidth", ctypes.c_ulong),
+        ("dmPanningHeight", ctypes.c_ulong),
+    ]
+
+
+def _physical_screen_size():
+    """主显示器的**物理**像素尺寸（跟进程 DPI 感知无关）。"""
+    try:
+        dm = _DEVMODEW()
+        dm.dmSize = ctypes.sizeof(_DEVMODEW)
+        if ctypes.windll.user32.EnumDisplaySettingsW(None, 0, ctypes.byref(dm)):
+            return int(dm.dmPelsWidth), int(dm.dmPelsHeight)
+    except Exception:
+        pass
+    return 0, 0
+
+
+_CAPTURE_SCALE = None
+
+
+def _capture_scale():
+    """GetWindowRect 的坐标 -> ImageGrab 物理像素 的换算系数 (sx, sy)。"""
+    global _CAPTURE_SCALE
+    if _CAPTURE_SCALE is None:
+        sx = sy = 1.0
+        try:
+            pw, ph = _physical_screen_size()
+            lw = int(ctypes.windll.user32.GetSystemMetrics(0))
+            lh = int(ctypes.windll.user32.GetSystemMetrics(1))
+            if pw > 0 and lw > 0:
+                sx = pw / float(lw)
+            if ph > 0 and lh > 0:
+                sy = ph / float(lh)
+        except Exception:
+            pass
+        _CAPTURE_SCALE = (sx, sy)
+    return _CAPTURE_SCALE
+
+
+def _describe_window(hwnd):
+    """(pid, class, title, visible, rect) —— 拿不到就返回 None。"""
+    try:
+        u = ctypes.windll.user32
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetClassNameW(hwnd, cls, 256)
+        n = u.GetWindowTextLengthW(hwnd)
+        ttl = ctypes.create_unicode_buffer(n + 1)
+        u.GetWindowTextW(hwnd, ttl, n + 1)
+        pid = ctypes.c_ulong()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        r = _RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(r))
+        return (pid.value, cls.value, ttl.value, bool(u.IsWindowVisible(hwnd)),
+                r.left, r.top, r.right - r.left, r.bottom - r.top)
+    except Exception:
+        return None
+
+
+def _voice_panel_candidates():
+    """语音输入宿主名下的小窗：[(hwnd, 外壳类名)]。
+
+    ⚠️ 必须用 EnumChildWindows(GetDesktopWindow()) —— 面板那扇窗是外壳的**子窗口**，
+    EnumWindows 只列顶层窗，根本看不到它。
+    """
+    out = []
+    try:
+        u = ctypes.windll.user32
+        desktop = u.GetDesktopWindow()
+
+        def cb(h, l):
+            try:
+                d = _describe_window(h)
+                if not d:
+                    return True
+                pid, cls, ttl, vis, lx, ty, w, ht = d
+                # 大小统一换算到**物理像素**再比 —— 否则 DPI-unaware 和
+                # per-monitor aware 两个模式下筛出来的窗口集合不一样。
+                sx, sy = _capture_scale()
+                pw, ph = w * sx, ht * sy
+                if (cls == _VOICE_PANEL_CLASS
+                        and 0 < pw <= _VOICE_PANEL_MAX_W and 0 < ph <= _VOICE_PANEL_MAX_H
+                        and _proc_name(pid) == _VOICE_PANEL_PROC):
+                    parent = u.GetParent(h)
+                    pcls = ""
+                    if parent:
+                        pd = _describe_window(parent)
+                        if pd:
+                            pcls = pd[1]
+                    out.append((h, pcls))
+            except Exception:
+                pass
+            return True
+
+        u.EnumChildWindows(desktop, _ENUMPROC(cb), 0)
+    except Exception:
+        pass
+    return out
+
+
+_VOICE_BUTTON_RGB = (75, 195, 255)   # 语音面板那颗蓝色麦克风按钮的实测颜色
+
+
+def _dpi_scale(hwnd):
+    """窗口自己的 DPI 比例（只作参考）。**别拿它做截屏换算** —— 见 _capture_scale。"""
+    try:
+        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+        if dpi and dpi > 0:
+            return dpi / 96.0
+    except Exception:
+        pass
+    return 1.0
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+        ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+        ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+        ("biSizeImage", ctypes.c_uint32), ("biXPelsPerMeter", ctypes.c_int32),
+        ("biYPelsPerMeter", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+        ("biClrImportant", ctypes.c_uint32),
+    ]
+
+
+def _grab_region(left, top, width, height):
+    """抓一块**物理**像素区域 -> PIL.Image（快路径）。
+
+    ⚠️ 不要用 PIL.ImageGrab.grab(bbox=...)：它在 Windows 上是**抓整屏再裁**，
+    2880x1800 一次 ~67ms（实测），放在 10Hz 的轮询里太重 ——
+    「面板出现 -> 被藏」会拖到一秒多，用户看得见那一下。
+    这里直接 GDI BitBlt 那一小块，实测 ~10ms。
+
+    ⚠️ 屏幕 DC 的坐标**永远是物理像素**，跟进程的 DPI 感知无关 ——
+    实测：DPI-unaware 进程里 BitBlt(640,702) 截到的是一片空的物理区（蓝 0），
+    必须传物理坐标 (1280,1404) 才截得到面板（蓝 1678）。
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    w, h = int(width), int(height)
+    if w <= 0 or h <= 0:
+        return None
+    try:
+        u = ctypes.windll.user32
+        g = ctypes.windll.gdi32
+        hdc = u.GetDC(0)
+        mem = g.CreateCompatibleDC(hdc)
+        bmp = g.CreateCompatibleBitmap(hdc, w, h)
+        old = g.SelectObject(mem, bmp)
+        try:
+            g.BitBlt(mem, 0, 0, w, h, hdc, int(left), int(top), 0x00CC0020)
+            bi = _BITMAPINFOHEADER()
+            bi.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+            bi.biWidth = w
+            bi.biHeight = -h          # 自上而下
+            bi.biPlanes = 1
+            bi.biBitCount = 32
+            bi.biCompression = 0
+            buf = (ctypes.c_ubyte * (w * h * 4))()
+            got = g.GetDIBits(mem, bmp, 0, h, buf, ctypes.byref(bi), 0)
+        finally:
+            g.SelectObject(mem, old)
+            g.DeleteObject(bmp)
+            g.DeleteDC(mem)
+            u.ReleaseDC(0, hdc)
+        if not got:
+            return None
+        return Image.frombuffer("RGB", (w, h), bytes(buf), "raw", "BGRX", 0, 1)
+    except Exception:
+        return None
+
+
+def _has_mic_button(hwnd, left, top, width, height):
+    """这扇窗的矩形里有没有那颗蓝色麦克风按钮（像素判据）。
+
+    面板和输入法自己的那扇小窗**结构完全一样**（同进程、同类名、同为外壳的子窗、
+    都一直可见），唯一能区分的就是**画没画那颗蓝按钮**。
+    实测：面板那扇 rect 内蓝像素 ~1600，输入法那扇恒为 0。
+
+    left/top/width/height 是 **GetWindowRect 的原始值**（调用进程坐标空间），
+    内部按 _capture_scale() 换算成物理像素再截。
+    """
+    try:
+        sx, sy = _capture_scale()
+        pl, pt = int(left * sx), int(top * sy)
+        pw, ph = int(width * sx), int(height * sy)
+        if pw <= 0 or ph <= 0:
+            return 0
+        img = _grab_region(pl, pt, pw, ph)
+        if img is None:
+            # 兜底：ImageGrab（慢，但通用）
+            try:
+                from PIL import ImageGrab
+                img = ImageGrab.grab(bbox=(pl, pt, pl + pw, pt + ph)).convert("RGB")
+            except Exception:
+                return 0
+        px = img.load()
+        iw, ih = img.size
+        n = 0
+        for y in range(0, ih, 2):
+            for x in range(0, iw, 2):
+                r, g, b = px[x, y]
+                if (abs(r - _VOICE_BUTTON_RGB[0]) <= 30 and
+                        abs(g - _VOICE_BUTTON_RGB[1]) <= 30 and
+                        abs(b - _VOICE_BUTTON_RGB[2]) <= 30):
+                    n += 1
+        return n
+    except Exception:
+        return 0
+
+
+def _find_voice_panel_window():
+    """找出当前真正显示着语音面板的那扇窗 -> (hwnd, 外壳类名)。
+
+    判据：**自己的矩形里画着那颗蓝色麦克风按钮**。
+    只认外壳（ApplicationFrameWindow）托管的 —— 别的一律不碰。
+    """
+    try:
+        u = ctypes.windll.user32
+        for (h, pcls) in _voice_panel_candidates():
+            if pcls != _VOICE_PANEL_HOST_CLASS:
+                continue
+            d = _describe_window(h)
+            if not d:
+                continue
+            _, _, _, vis, l, t, w, ht = d
+            if not vis:
+                continue
+            if _has_mic_button(h, l, t, w, ht) > 50:
+                return h, pcls
+    except Exception:
+        pass
+    return None, None
+
+
+def _voice_session_active():
+    """语音输入宿主的音频会话是不是 Active（= 面板还开着）。查不到就当 False。"""
+    try:
+        for role in (_ROLE_MULTIMEDIA, _ROLE_CONSOLE):
+            for s in list_audio_sessions(role):
+                try:
+                    if s.owner == _VOICE_PANEL_PROC and s.state == 1:
+                        return True
+                finally:
+                    s.free()
+    except Exception:
+        pass
+    return False
+
+
 # ---------------------------------------------------------------- 开始录音的声音
 #
 # 为什么 waveOutSetVolume 压不住：那个接口只管**本进程**的 waveOut 会话
@@ -369,6 +746,7 @@ class _AudioSession(object):
         self.display_name = ""
         self.owner = ""          # 宿主进程名（小写）
         self.pid = 0
+        self.state = None        # 0=inactive 1=active 2=inactive-but-open
         self.volume = None
         self.muted = None
         self.volume_obj = _query_interface(ctrl, _IID_ISimpleAudioVolume)
@@ -384,6 +762,13 @@ class _AudioSession(object):
         except Exception:
             pass
         self._read_owner()
+        try:
+            st = ctypes.c_int()
+            if _vt(self.ctrl, 3, ctypes.c_long,
+                   [ctypes.POINTER(ctypes.c_int)])(self.ctrl, ctypes.byref(st)) == 0:
+                self.state = st.value
+        except Exception:
+            pass
         if not self.volume_obj:
             return
         try:
