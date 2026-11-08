@@ -88,7 +88,8 @@
   },
   "stt": {
     "timeout_sec": 10,
-    "language": "auto"
+    "language": "auto",
+    "mode": "winh"
   },
   "tts": {
     "voice_hint": "Huihui",

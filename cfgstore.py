@@ -204,7 +204,8 @@ DEFAULTS = {
     },
     # stt.language: auto | zh-CN | en-US
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
-    "stt": {"timeout_sec": 10, "language": "auto"},
+    # stt.mode: winh = 走 Windows 自带语音输入（Win+H）；offline = 本机 System.Speech
+    "stt": {"timeout_sec": 10, "language": "auto", "mode": "winh"},
     "tts": {"voice_hint": "Huihui", "rate": 0},
     # ⚠️ 语言中性：只说「你是谁、怎么说话」，不说用哪种语言 ——
     #    语言规则由 i18n.LANG_RULES 按 reply_lang 追加，用户改这段也不会失效。
@@ -334,6 +335,12 @@ SPEC = [
      "unit": "秒", "en_unit": "s",
      "hint": "按一次键，最多听多久。听不到就问「没听清，再说一次？」",
      "en_hint": "How long one key press listens. If nothing is heard it asks to say that again."},
+    {"key": "stt.mode", "tab": "语音", "label": "听写方式", "en_label": "Dictation input",
+     "type": "choice", "choices": ["winh", "offline"],
+     "choices_i18n": {"zh": {"winh": "Win+H 语音输入", "offline": "本机离线听写"},
+                      "en": {"winh": "Win+H voice typing", "offline": "Offline dictation"}},
+     "hint": "Win+H 用 Windows 自带的语音输入；本机离线听写走 System.Speech，不联网。",
+     "en_hint": "Win+H uses the built-in Windows voice typing; offline dictation uses System.Speech locally."},
     {"key": "tts.voice_hint", "tab": "语音", "label": "播报音色", "en_label": "Voice",
      "type": "choice", "choices": ["Huihui", "Kangkang", "Yunyang", "Xiaoxiao", "Zira", "David"],
      "editable": True,

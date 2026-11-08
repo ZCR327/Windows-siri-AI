@@ -32,6 +32,7 @@ import i18n
 from llm import LLM
 import voice as voice_mod
 from keyhook import KeyHook
+import win_h as winh_mod
 import agent as agent_mod
 import tools as tools_mod
 import context as context_mod
@@ -875,16 +876,28 @@ class CardWindow(QtWidgets.QWidget):
         if not self.editing:
             self.start_edit()
 
-    def start_edit(self):
-        if not self.caption:
+    def start_edit(self, placeholder=None):
+        """进入编辑态。
+
+        placeholder 给了：输入框**清空**，用它当灰色提示文字。
+        Win+H 模式要这个 —— 提示词不能混进用户说的话里；
+        而且「什么都没识别到」时内容是空的，按 Enter 也不会误发。
+        """
+        if not self.caption and placeholder is None:
             return
         self.editing = True
-        self.editor.setPlainText(self.caption)
+        if placeholder is None:
+            self.editor.setPlainText(self.caption)
+            self.editor.setPlaceholderText("")
+        else:
+            self.editor.setPlainText("")
+            self.editor.setPlaceholderText(placeholder)
         self.editor.show()
         self.raise_()
         self.activateWindow()       # 让输入框拿到键盘焦点
         self.editor.setFocus()
-        self.editor.selectAll()      # 第一次点=整段选中，直接打字就是替换
+        if placeholder is None:
+            self.editor.selectAll()  # 第一次点=整段选中，直接打字就是替换
         self.update()
 
     def _cancel(self):
@@ -1076,6 +1089,25 @@ class VoiceThread(QtCore.QThread):
             self._emit("idle", "")
 
 
+def _begin_winh(overlay, card):
+    """Win+H 模式：弹卡片 -> 输入框拿焦点 -> 发 Win+H -> 等 Windows 往里打字。
+
+    为什么不自己开麦：这台机器的采集链路在驱动层就断了（见 win_h.py）。
+    Win+H 把采集和识别都交给 Windows，本项目只负责把输入框摆在前面。
+
+    做成**模块级函数**是为了能单测 —— main() 里的闭包没法在测试里碰到。
+    """
+    ui = i18n.ui_lang(overlay.cfg)
+    hint = i18n.t(ui, "reply.winh_hint")
+    overlay.set_ui("listening", hint)
+    card.start_edit(placeholder=hint)
+    if winh_mod is not None:
+        winh_mod.force_foreground(card)
+        card.editor.setFocus()
+        # 给 Windows 一点时间把焦点落实 —— 发早了焦点还在别的程序手里
+        QtCore.QTimer.singleShot(400, winh_mod.send_hotkey)
+
+
 def make_icon():
     pm = QtGui.QPixmap(64, 64)
     pm.fill(QtCore.Qt.transparent)
@@ -1211,11 +1243,18 @@ def main():
     overlay.set_card(card)
     card.sig_submit.connect(on_submit)
 
+    def trigger_winh():
+        _begin_winh(overlay, card)
+
     def trigger():
         nonlocal voice_thread
         if voice_thread is not None and voice_thread.isRunning():
             return
         overlay.mark_press()
+        stt = (overlay.cfg.get("stt") or {})
+        if (stt.get("mode") or "winh").lower() == "winh" and winh_mod is not None:
+            trigger_winh()
+            return
         # 同上：语音线程用最新配置（听写超时/播报音色/语速改了立刻生效）
         voice_thread = VoiceThread(overlay.cfg, llm=llm_shared)
         voice_thread.sig_ui.connect(overlay.set_ui)

@@ -107,6 +107,8 @@ STRINGS = {
     "reply.mic_crash": ("麦克风异常：听写进程崩溃（rc=%s）",
                         "Microphone error: the recognition process crashed (rc=%s)"),
     "reply.error": ("出错了：%s", "Something went wrong: %s"),
+    "reply.winh_hint": ("已开 Win+H，说吧 —— 说完按 Enter 发送",
+                        "Win+H is open - speak, then press Enter to send"),
     "reply.model_down": ("模型没连上。运行 python set_key.py 填一下 key 就能用。%s",
                          "The model isn't reachable. Run: python set_key.py to store a key. %s"),
 
