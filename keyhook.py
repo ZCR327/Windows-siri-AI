@@ -16,6 +16,7 @@ WM_HOTKEY = 0x0312
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
 MOD_NOREPEAT = 0x4000
 HOTKEY_ID = 0xBEEF
+LLKHF_INJECTED = 0x0010     # 这个键是程序注入的（SendInput），不是人按的
 
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, wintypes.HINSTANCE, wintypes.DWORD]
 user32.SetWindowsHookExW.restype = wintypes.HHOOK
@@ -93,6 +94,44 @@ def key_name(vk, sc, flags):
     return "%s%s" % (name, ext)
 
 
+# 最近一次按键事件。低层钩子的回调跑在事件投递**之前**，
+# 所以应用（卡片）收到按键时，这里已经是这一次按键自己的记录。
+LAST_KEY = {"vk": 0, "sc": 0, "flags": 0, "t": 0.0}
+
+
+def last_key_physical(vk, max_age=2.0):
+    """最近一次按下这个键，是**真人按的**还是**程序注入**的。
+
+    为什么要问这个：Windows 语音输入（Win+H）把识别到的字打进输入框后，
+    会用 SendInput 补一个回车来「提交」—— 那是程序注入的，不是人在确认。
+    本机麦克风驱动是坏的，它还会凭空吐一串乱码；那一串要是被当成人说的���
+    发给模型，就是最糟的失败方式（用户根本没打算问这个问题）。
+
+    没有记录 / 记录太旧 -> 一律当真人按的（保守放行）。
+    """
+    try:
+        if int(LAST_KEY["vk"]) != int(vk):
+            return True
+        if (time.time() - float(LAST_KEY["t"])) > max_age:
+            return True
+        return not (int(LAST_KEY["flags"]) & LLKHF_INJECTED)
+    except Exception:
+        return True
+
+
+def last_physical_key_recent(max_age=0.8):
+    """刚刚（默认 0.8 秒内）有没有人真的按过键。
+
+    用来判断输入框里的字是**人打的**还是**别处塞进来的**。
+    """
+    try:
+        if (time.time() - float(LAST_KEY["t"])) > max_age:
+            return False
+        return not (int(LAST_KEY["flags"]) & LLKHF_INJECTED)
+    except Exception:
+        return False
+
+
 class KeyHook(threading.Thread):
     def __init__(self, on_hotkey=None, on_match=None, hotkey="ctrl+alt+space",
                  scan_code=None, vk=None, log_path=None, log_all=True, swallow=True):
@@ -155,6 +194,12 @@ class KeyHook(threading.Thread):
                     vk, sc, fl = int(kbd.vkCode), int(kbd.scanCode), int(kbd.flags)
                 except Exception:
                     vk = sc = fl = 0
+                # 记下这一次按键（谁按的、有没有注入）—— 卡片靠它分辨
+                # 「用户亲手按的回车」和「程序塞进来的回车」
+                LAST_KEY["vk"] = vk
+                LAST_KEY["sc"] = sc
+                LAST_KEY["flags"] = fl
+                LAST_KEY["t"] = time.time()
                 matched = self._match(vk, sc)
                 # 命中的那个键**一定要留痕**：log_all=False 时也得记，
                 # 否则「按了没反应」根本查不出是键没被钩到还是后面挂了。

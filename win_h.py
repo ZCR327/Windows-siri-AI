@@ -20,6 +20,12 @@ Win+H 走 Windows 自带的「语音输入」（Win11 起是 Microsoft 在线语
 import ctypes
 import os
 import time
+from ctypes import wintypes
+
+
+class _RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 VK_LWIN = 0x5B
 VK_H = 0x48
@@ -75,6 +81,76 @@ def force_foreground(win):
         return False
 
 
+# ---------------------------------------------------------------- 焦点归还 / 输入法状态
+
+def foreground_hwnd():
+    """当前前台窗口的句柄（抢焦点之前先记住它）。"""
+    try:
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
+def restore_foreground(hwnd):
+    """把键盘焦点还给原来的窗口。
+
+    抢了焦点就得还 —— 否则用户后面敲的字全都进了那个卡片，
+    而卡片此时已经藏起来了，看起来就像「键盘失灵」。
+    """
+    try:
+        u = ctypes.windll.user32
+        k = ctypes.windll.kernel32
+        if not hwnd or not u.IsWindow(hwnd):
+            return False
+        tgt = u.GetWindowThreadProcessId(hwnd, None)
+        cur = k.GetCurrentThreadId()
+        if tgt:
+            u.AttachThreadInput(cur, tgt, True)
+        u.SetForegroundWindow(hwnd)
+        if tgt:
+            u.AttachThreadInput(cur, tgt, False)
+        return True
+    except Exception:
+        return False
+
+
+class _GUIThreadInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND),
+        ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND),
+        ("hwndCaret", wintypes.HWND),
+        ("rcCaret", _RECT),
+    ]
+
+
+def ime_composing():
+    """当前线程有没有输入法在组字。
+
+    组字期间 hwndCaret 指向类名是 "IME" 的那个窗（输入法候选窗）。
+    中文输入法提交时按下的那一下回车是**程序注入**的，
+    但它是有意图的 —— 所以输入法在组字时要放行。
+    """
+    try:
+        u = ctypes.windll.user32
+        k = ctypes.windll.kernel32
+        ti = _GUIThreadInfo()
+        ti.cbSize = ctypes.sizeof(ti)
+        if not u.GetGUIThreadInfo(k.GetCurrentThreadId(), ctypes.byref(ti)):
+            return False
+        if not ti.hwndCaret:
+            return False
+        buf = ctypes.create_unicode_buffer(64)
+        u.GetClassNameW(ti.hwndCaret, buf, 64)
+        return (buf.value or "").strip().lower() in _IME_CLASSES
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- 语音输入 UI 抑制
 
 # Win+H 弹出来的语音输入面板 / 提示卡，是 Windows 自己的 UI，**没有官方开关**。
@@ -121,9 +197,6 @@ _SW_HIDE = 0
 _ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_long)
 
 
-class _RECT(ctypes.Structure):
-    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
 def _win_rect(hwnd):

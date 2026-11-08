@@ -32,6 +32,7 @@ import i18n
 from llm import LLM
 import voice as voice_mod
 from keyhook import KeyHook
+import keyhook as keyhook_mod
 import win_h as winh_mod
 import agent as agent_mod
 import tools as tools_mod
@@ -883,6 +884,17 @@ class CardWindow(QtWidgets.QWidget):
         self.editor.viewport().setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
         self.editor.hide()
         self.editor.installEventFilter(self)
+        # 抢焦点之前的前台窗口：用完要还回去
+        self._prev_fg = 0
+        self._stole_focus = False
+        # 最近一次输入法事件的时刻（IME 提交时那一下回车是注入的，要放行）
+        self._ime_until = 0.0
+        # Win+H 阶段的兜底计时器：没人说话也没人确认，卡片不能一直挂着抢键盘
+        self._winh_timer = QtCore.QTimer(self)
+        self._winh_timer.setSingleShot(True)
+        self._winh_timer.timeout.connect(self._winh_timeout)
+        self._winh_cb = None
+        self.editor.textChanged.connect(self._on_text_changed)
 
     # ---------------------------------------------------------- 状态与位置
     def set_ui(self, state, text):
@@ -901,6 +913,7 @@ class CardWindow(QtWidgets.QWidget):
             if self.editing:
                 self._cancel()
             self.hide()
+            self.restore_foreground()
         self.update()
 
     def _place(self):
@@ -963,6 +976,41 @@ class CardWindow(QtWidgets.QWidget):
         self.editor.hide()
         self.editor.clear()
         self.update()
+        # Win+H 阶段按 Esc / 点外面 = 「算了」-> 整张卡片收掉，把键盘还回去
+        cb = self._winh_cb
+        if cb is not None:
+            self._winh_cb = None
+            try:
+                cb()
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------- 兜底计时器
+    def arm_timeout(self, sec, cb):
+        """Win+H 阶段兜底：没人说话也没人确认，卡片不能一直挂着抢键盘。"""
+        self._winh_cb = cb
+        try:
+            self._winh_timer.start(int(max(1.0, float(sec)) * 1000))
+        except Exception:
+            pass
+
+    def cancel_timeout(self):
+        try:
+            self._winh_timer.stop()
+        except Exception:
+            pass
+        self._winh_cb = None
+
+    def _winh_timeout(self):
+        cb = self._winh_cb
+        self._winh_cb = None
+        if cb is None:
+            return
+        _trace("winh timeout: nobody answered, closing the card")
+        try:
+            cb()
+        except Exception:
+            pass
 
     def _submit(self):
         text = self.editor.toPlainText().strip()
@@ -973,12 +1021,88 @@ class CardWindow(QtWidgets.QWidget):
         if text:
             self.sig_submit.emit(text)
 
+    # ---------------------------------------------------------- 焦点 / 回车把关
+    def remember_foreground(self):
+        """记住抢焦点之前的前台窗口 —— 用完必须还回去。"""
+        try:
+            self._prev_fg = winh_mod.foreground_hwnd() if winh_mod is not None else 0
+        except Exception:
+            self._prev_fg = 0
+        self._stole_focus = False
+
+    def mark_focus_stolen(self, ok):
+        """标记「焦点确实被我们抢走了」—— 没抢就别还。"""
+        self._stole_focus = bool(ok)
+
+    def restore_foreground(self):
+        """把键盘焦点还给原来的窗口。
+
+        ⚠️ 抢了不还 = 用户后面敲的字全都进了这个卡片，而卡片此时已经藏起来，
+        看起来就像「键盘失灵」。
+
+        ⚠️ 只有**真抢过**才还：覆盖层的 set_state/set_caption 会中途同步一次
+        卡片（那时文案还是空的、卡片会先藏一下），那时候我们还没抢焦点，
+        要是那时候就把 _prev_fg 用掉，最后反而没人还焦点。
+        """
+        if not self._stole_focus:
+            # 没抢过焦点就别动 _prev_fg —— 它是给「收尾那次还焦点」留的，
+            # 这里清掉的话最后就没人还了。
+            return
+        hwnd = self._prev_fg
+        self._prev_fg = 0
+        self._stole_focus = False
+        if not hwnd:
+            return
+        try:
+            ok = winh_mod.restore_foreground(hwnd) if winh_mod is not None else False
+            _trace("restore foreground: hwnd=%s ok=%s" % (hwnd, ok))
+        except Exception:
+            pass
+
+    def _enter_is_user(self):
+        """这一下回车是**用户亲手按的**吗？
+
+        真人按的 -> 放行。
+        程序注入的 -> 只有**输入法正在组字**时才放行
+        （中文输入法提交时按的那一下回车也是注入的，但那是用户的意思）。
+        """
+        if keyhook_mod.last_key_physical(0x0D):
+            return True
+        if time.time() < self._ime_until:
+            return True
+        try:
+            return bool(winh_mod.ime_composing()) if winh_mod is not None else False
+        except Exception:
+            return False
+
+    def _on_text_changed(self):
+        """输入框里的字变了 —— 记一笔是谁写进来的。"""
+        try:
+            n = len(self.editor.toPlainText())
+            if n <= 0:
+                return          # 清空输入框也会触发，别刷日志
+            who = ("keyboard" if keyhook_mod.last_physical_key_recent(0.8)
+                   else "voice/other")
+            _trace("card text changed by %s: %d chars" % (who, n))
+        except Exception:
+            pass
+
     def eventFilter(self, obj, ev):
         if obj is self.editor:
-            if ev.type() == QtCore.QEvent.KeyPress:
+            if ev.type() == QtCore.QEvent.InputMethod:
+                # 输入法在组字/提交 -> 记住这一刻（提交的回车是注入的）
+                self._ime_until = time.time() + 1.5
+            elif ev.type() == QtCore.QEvent.KeyPress:
                 if ev.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
                     if ev.modifiers() & QtCore.Qt.ShiftModifier:
                         return False            # Shift+Enter = 换行
+                    if not self._enter_is_user():
+                        # Windows 语音输入把识别到的字塞进来之后，
+                        # 会自己补一个回车来「提交」。那是程序注入的，
+                        # **不是人在确认** —— 吞掉，字留在输入框里。
+                        _trace("submit blocked: the Enter was injected, "
+                               "not pressed by the user")
+                        return True
                     self._submit()
                     return True
                 if ev.key() == QtCore.Qt.Key_Escape:
@@ -1166,16 +1290,29 @@ def _begin_winh(overlay, card):
     """
     ui = i18n.ui_lang(overlay.cfg)
     hint = i18n.t(ui, "reply.winh_hint")
+    # 抢焦点之前先记住原来是谁在前台 —— 用完要还回去
+    card.remember_foreground()
     overlay.set_ui("listening", hint)
     _trace("_begin_winh: set_ui done")
     card.start_edit(placeholder=hint)
     _trace("_begin_winh: start_edit done, card visible=%s" % card.isVisible())
     if winh_mod is not None:
         ok = winh_mod.force_foreground(card)
+        card.mark_focus_stolen(ok)
         card.editor.setFocus()
         _trace("_begin_winh: force_foreground=%s, focus queued for Win+H" % ok)
         # 给 Windows 一点时间把焦点落实 —— 发早了焦点还在别的程序手里
         stt_cfg = (overlay.cfg.get("stt") or {})
+        # 兜底：没人说话也没人确认 -> 卡片自己收掉，把键盘还回去
+        winh_timeout = float(stt_cfg.get("winh_timeout_sec", 45) or 45)
+
+        def _give_up():
+            try:
+                overlay.set_ui("idle", "")
+            except Exception:
+                pass
+
+        card.arm_timeout(winh_timeout, _give_up)
         # 开始录音那声「叮」：提前把语音输入宿主那个音频会话压掉（只压这一小会儿）
         # 注意：必须排在发 Win+H **之前** —— 提示音是 Windows 收到按键就播的
         if stt_cfg.get("mute_start_sound", True):
@@ -1328,6 +1465,11 @@ def main():
     def on_submit(text):
         """卡片里打字回车 —— 走和语音完全一样的回复链路。"""
         nonlocal reply_thread
+        _trace("submit: %s" % text[:80].replace("\n", " "))
+        try:
+            card.cancel_timeout()      # 已经确认了，别再兜底关卡片
+        except Exception:
+            pass
         if voice_thread is not None and voice_thread.isRunning():
             voice_thread.suppress = True      # 打字优先，语音那次的结果丢弃
         if reply_thread is not None and reply_thread.isRunning():
