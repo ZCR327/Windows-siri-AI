@@ -3,7 +3,7 @@ param(
 )
 $ErrorActionPreference = "SilentlyContinue"
 $lines = @()
-Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe'" | ForEach-Object {
+Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='pythonw.exe' OR Name='Siri-OS.exe'" | ForEach-Object {
     $lines += ("PROC|" + $_.ProcessId + "|" + $_.CommandLine)
 }
 if ($OutFile -ne "") {

@@ -19,7 +19,9 @@ ROOT = os.path.abspath(SPECPATH)
 ICON = os.path.join(ROOT, "siri_os.ico")
 
 # 只读资源：听写脚本（voice.py 会 powershell -File 它）
-datas = [(os.path.join(ROOT, "listen.ps1"), ".")]
+# probe_proc.ps1 是 doctor 的进程探针 —— 少了它，doctor 在打包版里看不到自己
+datas = [(os.path.join(ROOT, "listen.ps1"), "."),
+         (os.path.join(ROOT, "probe_proc.ps1"), ".")]
 
 # 隐式导入：这些模块是运行时动态拿的，PyInstaller 静态扫不出来
 hiddenimports = [
