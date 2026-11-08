@@ -155,9 +155,12 @@ class KeyHook(threading.Thread):
                     vk, sc, fl = int(kbd.vkCode), int(kbd.scanCode), int(kbd.flags)
                 except Exception:
                     vk = sc = fl = 0
-                if self.log_all:
+                matched = self._match(vk, sc)
+                # 命中的那个键**一定要留痕**：log_all=False 时也得记，
+                # 否则「按了没反应」根本查不出是键没被钩到还是后面挂了。
+                if self.log_all or matched:
                     self._log(vk, sc, fl)
-                if self._match(vk, sc):
+                if matched:
                     self._fire("match")
                     if self.swallow:
                         return 1

@@ -57,14 +57,16 @@ def force_foreground(win):
     try:
         u = ctypes.windll.user32
         k = ctypes.windll.kernel32
+        # QWidget 不是 HWND —— 必须取 winId()，不然 ctypes 直接抛 TypeError
+        hwnd = win if isinstance(win, int) else int(win.winId())
         fg = u.GetForegroundWindow()
         cur = k.GetCurrentThreadId()
         tgt = u.GetWindowThreadProcessId(fg, None) if fg else 0
         if tgt:
             u.AttachThreadInput(cur, tgt, True)
-        u.ShowWindow(win, 5)          # SW_SHOW
-        u.BringWindowToTop(win)
-        u.SetForegroundWindow(win)
+        u.ShowWindow(hwnd, 5)          # SW_SHOW
+        u.BringWindowToTop(hwnd)
+        u.SetForegroundWindow(hwnd)
         if tgt:
             u.AttachThreadInput(cur, tgt, False)
         return True

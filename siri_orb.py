@@ -46,6 +46,33 @@ CONFIG_PATH = cfgstore.CONFIG_PATH
 # 日志必须落在**可写目录**（源码=脚本目录；打包后=exe 同级目录）
 LOG_DIR = os.path.join((pathmod.data_dir() if pathmod else HERE), "logs")
 KEY_LOG = os.path.join(LOG_DIR, "keyhook.log")
+TRACE_LOG = os.path.join(LOG_DIR, "siri_orb_trace.log")
+
+
+def _trace(msg):
+    """落盘追踪：stdout + 独立日志文件双写。
+
+    打包后 stdout 会被重定向到 logs/siri_orb.log（行缓冲，是可靠的）；
+    再单独写一份文件，纯粹是为了日志被清掉时还能留证据。
+    ⚠️ 写文件失败**必须把异常打出来** —— 静默吞掉的话，
+       「追踪文件不存在」这种事实本身就成了最大的误导（2026-11-08 踩过）。
+    """
+    line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    try:
+        print("[trace] " + line)
+    except Exception:
+        pass
+    try:
+        if not os.path.isdir(LOG_DIR):
+            os.makedirs(LOG_DIR, exist_ok=True)
+        with open(TRACE_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
+    except Exception as e:
+        try:
+            print("[trace] file write failed: %r" % (e,))
+        except Exception:
+            pass
 
 # 默认值只有一份，在 cfgstore 里（设置面板的「恢复默认」也是用它）
 DEFAULT_CONFIG = cfgstore.DEFAULTS
@@ -363,8 +390,27 @@ class OrbRenderer(object):
 
 
 class Overlay(QtWidgets.QWidget):
+    # 触发键的回调跑在 keyhook 线程上，GUI 的活必须靠这个信号搬回主线程
+    sig_trigger = QtCore.pyqtSignal()
+
     # 麦克风电平（0..1）：由听写线程发出，驱动边光向内收缩
     sig_level = QtCore.pyqtSignal(float)
+
+    def do_winh(self):
+        """Win+H 流程 —— **必须在 GUI 线程里跑**。
+
+        keyhook 的回调跑在它自己的线程上：
+          - card.show() / setFocus() 跨线程会**静默失效**（窗口不出现）
+          - QTimer.singleShot 在没有 Qt 事件循环的线程里**永远不会触发**
+            （Win+H 压根发不出去）
+        所以用信号把活搬回主线程再干。
+        """
+        import threading
+        _trace("do_winh entered  thread=%s  card=%s" % (
+            threading.current_thread().name,
+            "yes" if self.card is not None else "NO"))
+        if self.card is not None:
+            _begin_winh(self, self.card)
 
     def __init__(self, cfg):
         QtWidgets.QWidget.__init__(self)
@@ -1089,6 +1135,17 @@ class VoiceThread(QtCore.QThread):
             self._emit("idle", "")
 
 
+def _send_winh():
+    """真的把 Win+H 按出去 —— 单独一层是为了能在日志里留下「发没发」的证据。"""
+    ok = False
+    try:
+        ok = bool(winh_mod.send_hotkey()) if winh_mod is not None else False
+    except Exception as e:
+        _trace("_send_winh raised: %r" % (e,))
+    _trace("_send_winh done, sent=%s" % ok)
+    return ok
+
+
 def _begin_winh(overlay, card):
     """Win+H 模式：弹卡片 -> 输入框拿焦点 -> 发 Win+H -> 等 Windows 往里打字。
 
@@ -1100,12 +1157,16 @@ def _begin_winh(overlay, card):
     ui = i18n.ui_lang(overlay.cfg)
     hint = i18n.t(ui, "reply.winh_hint")
     overlay.set_ui("listening", hint)
+    _trace("_begin_winh: set_ui done")
     card.start_edit(placeholder=hint)
+    _trace("_begin_winh: start_edit done, card visible=%s" % card.isVisible())
     if winh_mod is not None:
-        winh_mod.force_foreground(card)
+        ok = winh_mod.force_foreground(card)
         card.editor.setFocus()
+        _trace("_begin_winh: force_foreground=%s, focus queued for Win+H" % ok)
         # 给 Windows 一点时间把焦点落实 —— 发早了焦点还在别的程序手里
-        QtCore.QTimer.singleShot(400, winh_mod.send_hotkey)
+        QtCore.QTimer.singleShot(400, _send_winh)
+        _trace("_begin_winh: Win+H singleShot armed")
 
 
 def make_icon():
@@ -1243,8 +1304,11 @@ def main():
     overlay.set_card(card)
     card.sig_submit.connect(on_submit)
 
-    def trigger_winh():
-        _begin_winh(overlay, card)
+    # ⚠️ 必须**显式** QueuedConnection：keyhook 回调跑在普通 Python 线程上，
+    # PyQt5 对这种线程发信号时 AutoConnection 可能判成「同线程」-> 直接连接 ->
+    # 槽函数在 keyhook 线程里跑：card.show() 跨线程静默失效（卡片不出现），
+    # QTimer.singleShot 在没有事件循环的线程里**永不触发**（Win+H 发不出去）。
+    overlay.sig_trigger.connect(overlay.do_winh, QtCore.Qt.QueuedConnection)
 
     def trigger():
         nonlocal voice_thread
@@ -1253,7 +1317,12 @@ def main():
         overlay.mark_press()
         stt = (overlay.cfg.get("stt") or {})
         if (stt.get("mode") or "winh").lower() == "winh" and winh_mod is not None:
-            trigger_winh()
+            import threading
+            _trace("trigger: emitting sig_trigger  thread=%s" % threading.current_thread().name)
+            # ⚠️ 这里跑在 keyhook 线程上，**绝不能直接碰 GUI** ——
+            # 跨线程 show()/setFocus() 静默失效，QTimer.singleShot 永不触发。
+            # 用信号把活搬回 GUI 线程。
+            overlay.sig_trigger.emit()
             return
         # 同上：语音线程用最新配置（听写超时/播报音色/语速改了立刻生效）
         voice_thread = VoiceThread(overlay.cfg, llm=llm_shared)
