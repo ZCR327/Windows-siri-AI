@@ -1285,6 +1285,15 @@ def main():
         overlay.setGeometry(screen.geometry())
     overlay.show()
 
+    # 大致位置：**后台**预热 —— 定位要 2~4 秒，不能让第一句话干等。
+    # 位置本身由 locate 模块管（缓存 + 定期刷新），这里只把活配置喂给它。
+    try:
+        import locate as locate_mod
+        locate_mod.set_cfg_provider(lambda: overlay.cfg)
+        locate_mod.start_warmup()
+    except Exception as e:
+        _trace("locate warmup failed: %r" % (e,))
+
     # 截图工具用得上：截之前先把覆盖层藏起来，否则截出来的是自己的光晕
     def _hide_overlay(hide):
         try:

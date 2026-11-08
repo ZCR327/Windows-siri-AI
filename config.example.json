@@ -84,7 +84,9 @@
   "ctx": {
     "enabled": true,
     "history_turns": 6,
-    "sysinfo": true
+    "sysinfo": true,
+    "location": true,
+    "location_ttl_min": 30
   },
   "stt": {
     "timeout_sec": 10,

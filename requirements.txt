@@ -9,4 +9,3 @@ opencv-python
 pywin32
 requests
 win32clipboard
-win_h

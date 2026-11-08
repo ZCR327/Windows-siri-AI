@@ -30,7 +30,7 @@ class ToolError(Exception):
 
 
 # ------------------------------------------------------------------ 权限
-CATEGORIES = ("file", "web", "image", "screen", "shell")
+CATEGORIES = ("file", "web", "image", "screen", "shell", "location")
 
 CAT_LABEL = {
     "file": "文件操作",
@@ -38,6 +38,7 @@ CAT_LABEL = {
     "image": "图片处理",
     "screen": "电脑操控（鼠标键盘）",
     "shell": "执行命令",
+    "location": "位置查询",
 }
 
 
@@ -48,6 +49,11 @@ def allowed(cfg, category):
     - 鼠标键盘 / 执行命令另有独立开关（默认关）。
     """
     a = ((cfg or {}).get("agent") or {})
+    if category == "location":
+        # 位置工具要**两把钥匙**：agent 总开关 + 「附带大致位置」开关。
+        # 总开关关了就得一把都不给 —— 不然「关掉助理能力」形同虚设。
+        return (bool(a.get("enabled", True))
+                and bool(((cfg or {}).get("ctx") or {}).get("location", True)))
     if not a.get("enabled", True):
         return False
     if category == "screen":
@@ -735,6 +741,22 @@ def _p(desc, typ="string"):
     return {"type": typ, "description": desc}
 
 
+def t_get_location(args, cfg):
+    """查用户当前位置（精确到区一级）。会真的定位一次，几秒钟。"""
+    try:
+        import locate as locate_mod
+    except Exception as e:
+        return "定位模块不可用：%r" % (e,)
+    p = locate_mod.refresh(cfg, force=True)
+    if not p:
+        d = locate_mod.describe()
+        return ("没能定位到当前位置（%s）。可以打开系统的「位置服务」再试一次，"
+                "或者确认网络是通的。" % (d.get("last_err") or "未知原因"))
+    acc = p.get("acc")
+    tail = ("，定位精度约 %d 米" % acc) if acc else ""
+    return "用户当前位置：%s（来源：%s%s）" % (p.get("text"), p.get("source"), tail)
+
+
 TOOLS = [
     {"name": "list_files", "category": "file",
      "description": "列出工作目录里的文件和文件夹",
@@ -900,6 +922,11 @@ TOOLS = [
          "command": _p("要执行的命令"),
          "timeout": _p("超时秒数，默认 60", "integer")}, "required": ["command"]},
      "fn": t_run_command},
+
+    {"name": "get_location", "category": "location",
+     "description": "查用户当前所在的位置（精确到区一级，例如「上海市浦东新区」）",
+     "parameters": {"type": "object", "properties": {}, "required": []},
+     "fn": t_get_location},
 ]
 
 BY_NAME = dict((t["name"], t) for t in TOOLS)

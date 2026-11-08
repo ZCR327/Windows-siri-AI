@@ -363,6 +363,12 @@ def _check_agent():
     ok(toolmod.allowed(on, "shell"), "显式打开 -> 执行命令能用")
     ok(not toolmod.allowed({"agent": {"enabled": False}}, "file"),
        "总开关关着 -> 什么都不能用")
+    ok(not toolmod.allowed({"agent": {"enabled": False}}, "location"),
+       "总开关关着 -> 位置工具也不能用")
+    ok(toolmod.allowed({"agent": {"enabled": True}, "ctx": {"location": True}},
+                        "location"), "两把钥匙都开 -> 位置工具能用")
+    ok(not toolmod.allowed({"agent": {"enabled": True}, "ctx": {"location": False}},
+                            "location"), "位置开关关着 -> 位置工具也不能用")
 
     # ---------------- 文件工具锁死工作目录
     cfg = {"agent": {"enabled": True, "work_dir": ""}}
@@ -378,7 +384,7 @@ def _check_agent():
     ok(inside.startswith(base), "工作目录内的路径放行", "-> %s" % inside)
 
     # ---------------- 工具清单
-    ok(len(toolmod.TOOLS) == 27, "工具一共 27 个", "-> %d" % len(toolmod.TOOLS))
+    ok(len(toolmod.TOOLS) == 28, "工具一共 28 个", "-> %d" % len(toolmod.TOOLS))
     tnames = [t["name"] for t in toolmod.TOOLS]
     ok(len(set(tnames)) == len(tnames), "工具名不重复")
     for cat in toolmod.CATEGORIES:
@@ -435,10 +441,12 @@ def _check_context():
         ok("enabled" in c, "ctx 段有 enabled")
         ok("history_turns" in c, "ctx 段有 history_turns")
         ok("sysinfo" in c, "ctx 段有 sysinfo")
+        ok("location" in c, "ctx 段有 location")
+        ok("location_ttl_min" in c, "ctx 段有 location_ttl_min")
     ok("上下文" in cfgstore.TABS, "页签里有「上下文」")
     ok(cfgstore.TAB_EN.get("上下文") == "Context", "「上下文」有英文页签名")
     specs = [s for s in cfgstore.SPEC if s.get("tab") == "上下文"]
-    ok(len(specs) == 3, "上下文页有 3 个旋钮", "-> %d" % len(specs))
+    ok(len(specs) == 5, "上下文页有 5 个旋钮", "-> %d" % len(specs))
     for s in specs:
         ok(bool(s.get("label")) and bool(s.get("en_label")), "%s 有中英标签" % s["key"])
         ok(bool(s.get("hint")) and bool(s.get("en_hint")), "%s 有中英提示" % s["key"])
@@ -459,7 +467,8 @@ def _check_context():
     ok(len(n) == 2, "连续两条 user 被合并", "-> %d" % len(n))
 
     # ---------------- 电脑状态
-    cfg = {"ctx": {"enabled": True, "history_turns": 6, "sysinfo": True},
+    cfg = {"ctx": {"enabled": True, "history_turns": 6, "sysinfo": True,
+                   "location": True, "location_ttl_min": 30},
            "agent": {"enabled": True, "work_dir": ""}}
     s1 = ctx_mod.system_context(cfg)
     ok(bool(s1), "能生成电脑状态块")
@@ -469,12 +478,20 @@ def _check_context():
     sp = ctx_mod.compose_system(cfg, extra="能力说明")
     ok("能力说明" in sp, "compose_system 把附加内容拼进去了")
 
+    # ---------------- 大致位置（区级）
+    ok(ctx_mod.location_enabled({"ctx": {"location": True}}), "位置开关默认开")
+    ok(not ctx_mod.location_enabled({"ctx": {"location": False}}), "位置开关能关")
+    ok(ctx_mod.location_context({"ctx": {"location": False}}) == "",
+       "关掉位置就不带位置")
+    ok(ctx_mod.location_context(cfg) == "",
+       "没有缓存时位置块是空的（不阻塞、不联网）")
+
     # ---------------- 面板上真的有这一页
     dlg = S.SettingsDialog()
     try:
         ok("上下文" in dlg._tab_widgets, "面板上有「上下文」页签")
         rows = [(sp2, ctrl) for sp2, ctrl in dlg.rows if sp2.get("tab") == "上下文"]
-        ok(len(rows) == 3, "面板「上下文」页有 3 个控件", "-> %d" % len(rows))
+        ok(len(rows) == 5, "面板「上下文」页有 5 个控件", "-> %d" % len(rows))
     finally:
         try:
             dlg.hide()

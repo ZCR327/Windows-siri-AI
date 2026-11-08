@@ -60,6 +60,7 @@ def _names():
     except Exception:
         out.extend(("minimax", "deepseek", "zhipu", "openai"))
     out.append("jina")
+    out.append("amap")     # 高德：装了才有，装了位置反查会更准（可留空）
     return tuple(out)
 
 

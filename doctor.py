@@ -53,7 +53,7 @@ import json  # noqa: E402  (放在 load_cfg 之后只是为了让上面的顺序
 
 # ---------------------------------------------------------------- 1 依赖
 def check_deps():
-    say(INFO, "--- 1/8 python deps ---")
+    say(INFO, "--- 1/9 python deps ---")
     missing = []
     for label, mod in (("numpy", "numpy"), ("PIL", "PIL"), ("requests", "requests"),
                         ("PyQt5", "PyQt5"), ("win32com", "win32com.client"),
@@ -69,7 +69,7 @@ def check_deps():
 
 # ---------------------------------------------------------------- 2 配置
 def check_config(cfg):
-    say(INFO, "--- 2/8 config.json ---")
+    say(INFO, "--- 2/9 config.json ---")
     sc = cfg.get("xiaomi_scan_code")
     if isinstance(sc, int) and 0 < sc < 256:
         say(OK, "xiaomi_scan_code = 0x%02X (sc bound)" % sc)
@@ -105,7 +105,7 @@ def check_config(cfg):
 
 # ---------------------------------------------------------------- 3 渲染
 def check_render(cfg, make_sheet=True):
-    say(INFO, "--- 3/8 renderer self-test ---")
+    say(INFO, "--- 3/9 renderer self-test ---")
     try:
         import numpy as np
         from siri_orb import GlowRenderer
@@ -210,7 +210,7 @@ def build_sheet(gr, bw, delay, sweep):
 
 # ---------------------------------------------------------------- 4 音频设备
 def check_audio_devices():
-    say(INFO, "--- 4/8 audio devices (SAPI) ---")
+    say(INFO, "--- 4/9 audio devices (SAPI) ---")
     out = os.path.join(HERE, "tmp", "audio_probe.txt")
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -253,7 +253,7 @@ def check_audio_devices():
 
 # ---------------------------------------------------------------- 5 麦克风
 def check_mic():
-    say(INFO, "--- 5/8 microphone capture (3s) ---")
+    say(INFO, "--- 5/9 microphone capture (3s) ---")
     out = os.path.join(HERE, "tmp", "doctor_stt.txt")
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
            os.path.join(HERE, "listen.ps1"), "-OutFile", out, "-TimeoutSec", "3", "-Language", "zh-CN"]
@@ -281,7 +281,7 @@ def check_mic():
 
 # ---------------------------------------------------------------- 6 模型
 def check_llm(cfg):
-    say(INFO, "--- 6/8 LLM backends ---")
+    say(INFO, "--- 6/9 LLM backends ---")
     lcfg = cfg.get("llm") or {}
     try:
         from llm import MinimaxBackend, DeepSeekBackend, ZhipuBackend
@@ -325,7 +325,7 @@ def check_llm(cfg):
 
 # ---------------------------------------------------------------- 7 常驻
 def check_service():
-    say(INFO, "--- 7/8 resident service ---")
+    say(INFO, "--- 7/9 resident service ---")
     out = os.path.join(HERE, "tmp", "proc_probe.txt")
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -367,7 +367,7 @@ def check_service():
 
 # ---------------------------------------------------------------- 8 开机自启
 def check_autostart(cfg):
-    say(INFO, "--- 8/8 autostart + config path ---")
+    say(INFO, "--- 8/9 autostart + config path ---")
     try:
         import install_autostart as ia
     except Exception as e:
@@ -412,6 +412,30 @@ def check_autostart(cfg):
         pass
 
 
+# ---------------------------------------------------------------- 9 位置
+def check_location(cfg):
+    say(INFO, "--- 9/9 location ---")
+    try:
+        import locate as locate_mod
+    except Exception as e:
+        say(WARN, "locate module unavailable: %r" % e)
+        return
+    if not locate_mod.enabled(cfg):
+        say(INFO, "location is OFF (ctx.location) - nothing to check")
+        return
+    t0 = time.time()
+    p = locate_mod.refresh(cfg, force=True)
+    d = locate_mod.describe()
+    if p:
+        say(OK, "located: %s  (source=%s, %.1fs)" % (
+            p.get("text"), p.get("source"), time.time() - t0))
+        say(INFO, "  gps ok=%s  accuracy=%s m" % (d.get("gps_ok"), d.get("gps_acc_m")))
+        say(INFO, "  (only the district text ever reaches the model)")
+    else:
+        say(WARN, "could not locate (last error: %s)" % (d.get("last_err") or "?"))
+        say(INFO, "  check the Windows location service and the network")
+
+
 def main():
     t0 = time.time()
     say(INFO, "Siri-OS doctor @ %s" % time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -429,6 +453,7 @@ def main():
     check_llm(cfg)
     check_service()
     check_autostart(cfg)
+    check_location(cfg)
     return finish(t0)
 
 

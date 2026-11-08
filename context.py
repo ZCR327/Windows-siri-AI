@@ -52,6 +52,11 @@ def sysinfo_enabled(cfg):
     return bool(_ctx(cfg).get("sysinfo", True))
 
 
+def location_enabled(cfg):
+    """要不要带上大致位置（区级）。"""
+    return bool(_ctx(cfg).get("location", True))
+
+
 def history_turns(cfg):
     """记住几轮（1 轮 = 用户一句 + 助手一句）。"""
     try:
@@ -222,13 +227,37 @@ def normalize_roles(messages):
     return out
 
 
+# ------------------------------------------------------------ 大致位置
+def location_context(cfg):
+    """用户的大致位置（精确到**区**一级）。
+
+    ⚠️ **只读缓存，绝不阻塞**：定位要 2~4 秒，不能让每一句回答都等它。
+       常驻助手启动时会后台预热（locate.start_warmup），这里只取现成的。
+    ⚠️ 只有区级文字会进提示词；经纬度既不发出去也不写日志。
+    """
+    if not location_enabled(cfg):
+        return ""
+    try:
+        import locate as locate_mod
+    except Exception:
+        return ""
+    try:
+        t = locate_mod.text(cfg)
+    except Exception:
+        return ""
+    if not t:
+        return ""
+    return ("[大致位置]" + NL + "用户所在的位置：" + t +
+            "（精确到区一级；需要重新定位可以调用 get_location 工具）")
+
+
 def compose_system(cfg, extra=""):
-    """系统提示词 = 用户写的提示词 + 语言规则 + 电脑状态 + （能力说明）。"""
+    """系统提示词 = 用户写的提示词 + 语言规则 + 大致位置 + 电脑状态 + （能力说明）。"""
     base = ""
     if i18n is not None:
         try:
             base = i18n.build_system_prompt(cfg)
         except Exception:
             base = ""
-    parts = [p for p in (base, system_context(cfg), extra) if p]
+    parts = [p for p in (base, location_context(cfg), system_context(cfg), extra) if p]
     return NL2.join(parts)

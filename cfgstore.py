@@ -197,10 +197,13 @@ DEFAULTS = {
     # ---- 上下文 ----
     # 对话记忆只存在**内存里**（关掉程序就没了），不写文件、不进 config.json。
     # 电脑状态是每次请求都附带的一小段摘要（前台窗口 / 窗口清单 / 分辨率 / 工作目录）。
+    # 大致位置：只到**区**一级，经纬度不外传、不落盘。
     "ctx": {
         "enabled": True,
         "history_turns": 6,
         "sysinfo": True,
+        "location": True,
+        "location_ttl_min": 30,
     },
     # stt.language: auto | zh-CN | en-US
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
@@ -448,6 +451,17 @@ SPEC = [
      "type": "bool",
      "hint": "每次都告诉模型：当前开着哪些窗口、屏幕多大、工作目录在哪。要看屏幕画面，模型可以自己截图。",
      "en_hint": "Tell the model every turn which windows are open, the screen size and the working folder. To see the actual screen it can take a screenshot itself."},
+    {"key": "ctx.location", "tab": "上下文", "label": "附带大致位置",
+     "en_label": "Include approximate location",
+     "type": "bool",
+     "hint": "让助手知道你大致在哪个区（精确到区一级，比如「上海市浦东新区」）。会向地理编码服务发一次坐标请求来换地名；经纬度本身不会发给模型，也不写进日志。",
+     "en_hint": "Lets the assistant know roughly which district you are in (district level only). One coordinate request goes out to the geocoding service; the coordinates themselves are never sent to the model and never logged."},
+    {"key": "ctx.location_ttl_min", "tab": "上下文", "label": "位置缓存时长",
+     "en_label": "Location cache minutes",
+     "type": "int", "min": 5, "max": 240, "step": 5,
+     "unit": "分钟", "en_unit": "min",
+     "hint": "位置多久重新查一次。默认 30 分钟；关掉「附带大致位置」时这个不起作用。",
+     "en_hint": "How often the location is refreshed. 30 minutes by default; ignored when the location switch is off."},
 
     # ---------------- 系统
     {"key": "autostart", "tab": "系统", "label": "开机自启", "en_label": "Start at login",
