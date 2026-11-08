@@ -9,3 +9,4 @@
 # 二进制
 *.png binary
 *.npy binary
+*.exe binary

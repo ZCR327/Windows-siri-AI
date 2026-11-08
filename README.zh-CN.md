@@ -34,8 +34,10 @@
 
 **环境要求：** Windows 10/11、Python 3.10+、一块有任务栏的屏幕。
 
-**或者干脆不装 Python**：`build_exe.py` 会打出一个单文件 `Siri-OS.exe`，
-拷到哪都能双击跑。配置、密钥库、日志都写在 exe 旁边。
+**或者干脆不装 Python**：仓库里的 [`one-click/`](one-click/) 文件夹就是打好的成品 ——
+`one-click/Siri-OS.exe` 拷到任意能写的地方双击即可，配置、密钥库、日志都写在 exe 旁边。
+自己打的话，`build_exe.py` 会产出同一个单文件 `Siri-OS.exe`，
+见[单文件，不用装 Python](#单文件不用装-python)。
 
 ```powershell
 pip install -r requirements.txt
@@ -282,6 +284,10 @@ Anthropic 要求 `user` / `assistant` 必须交替，而「历史 + 当前问题
 ### 单文件，不用装 Python
 
 `build_exe.py` 用 PyInstaller 跑 `siri_os.spec`，产出一个单文件 `Siri-OS.exe`。
+
+仓库里已经把这个成品放在 [`one-click/`](one-click/) 里了 —— 一个下下来就能用的文件夹，
+里面有 exe、英文 `README.txt` 和中文 `使用说明.txt`。下载整个文件夹、拷到能写的地方、双击即可。
+改了源码的话，自己重新打一份 exe 放进去。
 
 打包后有**两套目录**，搞混是最经典的坑：解包目录（`sys._MEIPASS`）是只读的，
 放代码和 `listen.ps1`；**exe 同级目录**是可写的，放 `config.json`、密钥库和日志。
