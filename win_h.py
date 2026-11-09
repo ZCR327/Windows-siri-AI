@@ -29,6 +29,7 @@ class _RECT(ctypes.Structure):
 
 VK_LWIN = 0x5B
 VK_H = 0x48
+VK_ESCAPE = 0x1B
 KEYUP = 0x0002
 
 
@@ -342,8 +343,14 @@ def suppress_voice_ui(max_seconds=None, interval=0.05, on_hide=None):
                     panel, panel_host = _find_voice_panel_window()
                     if panel:
                         hidden.append((panel, panel_host))
+                        d = _describe_window(panel)
+                        was_vis = bool(d[3]) if d else False
                         if on_hide:
-                            on_hide("panel hwnd=%s host=%r" % (panel, panel_host))
+                            # was_visible=False 说明这扇窗**本来就是藏着的**
+                            # （上一次抑制线程被杀留下的烂摊子）——
+                            # 这次收尾会顺手把它放出来（自愈）。
+                            on_hide("panel hwnd=%s host=%r was_visible=%s"
+                                    % (panel, panel_host, was_vis))
                 for (h, pcls) in list(hidden):
                     try:
                         if u.IsWindow(h) and u.IsWindowVisible(h):
@@ -680,10 +687,19 @@ def _has_mic_button(hwnd, left, top, width, height):
 
 
 def _find_voice_panel_window():
-    """找出当前真正显示着语音面板的那扇窗 -> (hwnd, 外壳类名)。
+    """找出**正在显示的**语音输入面板那扇窗 -> (hwnd, 外壳类名)。
 
-    判据：**自己的矩形里画着那颗蓝色麦克风按钮**。
-    只认外壳（ApplicationFrameWindow）托管的 —— 别的一律不碰。
+    判据：自己矩形里画着那颗蓝色麦克风按钮（>50 个蓝像素），
+    且由外壳 ApplicationFrameWindow 托管 —— 别的一律不碰。
+
+    ⚠️ **必须要求它是可见的**（2026-11-09 踩过这个坑）：
+    试过放宽成「身份对得上就认」，结果抑制线程在收尾时会把
+    **Windows 自己藏着的面板强行显示出来** —— 凭空多一个空浮窗。
+    面板的可见性归 Windows 管；我们只在它「正在显示」时把它藏掉。
+
+    为什么今天日志里一条 suppress_voice_ui 都没有：面板压根没弹出来
+    （hwnd=329014 一直 vis=False），所以没东西要藏 —— 这是对的，
+    不是安全网坏了。真正的问题在别处（见 dismiss_voice_session）。
     """
     try:
         u = ctypes.windll.user32
@@ -701,6 +717,90 @@ def _find_voice_panel_window():
     except Exception:
         pass
     return None, None
+
+
+# 认出来的面板句柄缓存 —— 免得每次问「语音还在不在」都去全桌面扫一遍
+_PANEL_HWND = 0
+
+
+def _voice_panel_hwnd_light():
+    """轻量找面板：只按身份找（外壳托管 + 小窗），**不做像素判据**。
+
+    「语音会话还活着吗」这种问题要问得很频繁（每次还焦点前都要问），
+    不适合每问一次就截一次屏。
+    """
+    try:
+        for (h, pcls) in _voice_panel_candidates():
+            if pcls != _VOICE_PANEL_HOST_CLASS:
+                continue
+            return h
+    except Exception:
+        pass
+    return 0
+
+
+def _panel_hwnd_cached():
+    """面板句柄（认出来就缓存）。"""
+    global _PANEL_HWND
+    try:
+        if _PANEL_HWND and ctypes.windll.user32.IsWindow(_PANEL_HWND):
+            return _PANEL_HWND
+    except Exception:
+        pass
+    try:
+        h = _voice_panel_hwnd_light()
+        if h:
+            _PANEL_HWND = h
+    except Exception:
+        pass
+    return _PANEL_HWND
+
+
+def dismiss_voice_session():
+    """把 Windows 语音输入会话关掉（发一个 Esc），返回是否发出。
+
+    为什么必须关：Win+H 起的语音会话会**一直按着键盘**，直到它自己超时。
+    这期间用户敲的字会被语音输入吃掉 —— 哪怕焦点已经还给用户的应用了，
+    表现就是「别的应用没有反馈」（2026-11-09 实测：发完 Win+H 0.5 秒时
+    语音音频会话还是 Active）。
+
+    ⚠️ **只在会话真的活着的时候发**：Esc 是发给当前焦点窗口的，
+    会话已经结束时再补一个 Esc，会变成在用户的应用里乱按一下。
+    """
+    try:
+        if not _voice_session_active():
+            return False
+    except Exception:
+        return False
+    try:
+        u = ctypes.windll.user32
+        u.keybd_event(VK_ESCAPE, 0, 0, 0)
+        time.sleep(0.03)
+        u.keybd_event(VK_ESCAPE, 0, KEYUP, 0)
+        return True
+    except Exception:
+        return False
+
+
+def voice_ui_active():
+    """Windows 语音输入现在是不是还「开着」（面板在，或者语音会话还活着）。
+
+    用它守住一件事：**别在语音会话还活着的时候把键盘还给用户的应用**。
+    语音会话期间键盘是被系统语音输入按着的，这时候把焦点还回去，
+    用户敲的字会被悄悄吃掉 —— 表现就是「别的应用没反馈」。
+    """
+    try:
+        if _voice_session_active():
+            return True
+    except Exception:
+        pass
+    try:
+        h = _panel_hwnd_cached()
+        if h and ctypes.windll.user32.IsWindowVisible(h):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _voice_session_active():

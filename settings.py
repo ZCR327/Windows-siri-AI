@@ -46,6 +46,8 @@ QWidget { background:#141419; color:#E8E9F0; font-family:'Microsoft YaHei UI'; f
 QLabel#title { font-size:19px; font-weight:600; color:#FFFFFF; }
 QLabel#hint { color:#7C7F8E; font-size:12px; }
 QLabel#status { color:#9EA0AE; font-size:12px; }
+QLabel#alert { color:#F3B0B0; background:#2A1618; border:1px solid #5E2C30;
+                border-radius:6px; padding:8px 10px; font-size:12px; }
 QTabWidget::pane { border:1px solid #26272F; border-radius:8px; top:-1px; }
 QTabBar::tab { background:#1B1C23; color:#9EA0AE; padding:7px 18px; border:1px solid #26272F;
                border-bottom:none; border-top-left-radius:8px; border-top-right-radius:8px; margin-right:2px; }
@@ -427,6 +429,19 @@ class SettingsDialog(QtWidgets.QDialog):
         sub = QtWidgets.QLabel(self.T("settings.subtitle"))
         sub.setObjectName("hint")
         root.addWidget(sub)
+
+        # ⚠️ 配置读坏过 → 顶部挂一条红条。
+        #    不提示的话，用户在面板点一次「保存」= 原配置被默认值覆盖，而且不可逆。
+        try:
+            bad_cfg = cfgstore.LAST_ERROR
+        except Exception:
+            bad_cfg = ""
+        if bad_cfg:
+            alert = QtWidgets.QLabel(self.T("settings.cfg_bad") % bad_cfg
+                                     + "\n" + self.T("settings.cfg_bad.hint"))
+            alert.setObjectName("alert")
+            alert.setWordWrap(True)
+            root.addWidget(alert)
 
         self.tabs = QtWidgets.QTabWidget()
         for tab in cfgstore.TABS:
@@ -810,8 +825,10 @@ class SettingsDialog(QtWidgets.QDialog):
             else:
                 self._set_status(self.T("settings.saved"))
             self._apply_autostart(cfg)
+            return True
         except Exception as e:
             self._set_status(self.T("settings.save_failed") % e)
+            return False
 
     def _reset_defaults(self):
         before = self.lang()
@@ -933,10 +950,19 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def closeEvent(self, ev):
         self._save_timer.stop()
+        ok = True
         try:
-            self._do_save()
+            ok = self._do_save()
         except Exception:
-            pass
+            ok = False
+        if not ok:
+            # ⚠️ 保存失败不能闷声把窗口关掉 —— 用户会以为设置存上了。
+            try:
+                QtWidgets.QMessageBox.warning(
+                    self, self.T("settings.title"),
+                    self.T("settings.save_failed_popup") % self._status_msg)
+            except Exception:
+                pass
         super(SettingsDialog, self).closeEvent(ev)
 
 

@@ -18,6 +18,7 @@ import io
 import json
 import os
 import tempfile
+import time
 
 try:
     import providers as prov
@@ -171,11 +172,21 @@ DEFAULTS = {
     "caption_max_width": 900,
     "caption_font_size": 14,        # 字幕卡正文字号
     "caption_position": "top",
+    "weather_linger_sec": 25,       # 天气面板答完话后还在屏幕上留多久（秒）
     "wave_delay_sec": 0.2,
     "wave_sweep_sec": 0.5,
     "wave_band_frac": 0.032,
     "glow_origin": [0.9236, 0.9711],
     "glow_intensity": 1.0,          # 边光亮度上限（倍率，1.0 = 原始亮度）
+    # 辉光缓冲的降采样倍率：每个缓冲像素对应多少物理像素。
+    # 6 = 2880x1800 的屏用 480x300 缓冲（实测 33fps）；3 = 960x600（画质高但只有 6fps）。
+    "glow_scale": 6,
+    # 只画脏矩形：边光只贴在四条边上，中间那一大片是透明的，
+    # 整屏重绘纯属白烧 CPU（实测 paint 27.7ms -> 13.0ms）。
+    # 关掉就退回整屏重绘 —— 画面完全一样，只是更费。
+    "dirty_rect": True,
+    "dirty_thr": 8,         # 可见判定：alpha >= 8/255（3%）就算看得见
+    "dirty_tile": 8,        # 可见区段的网格粒度（缓冲像素）
     "show_tray_icon": True,         # 托盘图标
     "autostart": True,              # 开机自启
     "sim_rate": 4.2,                # 模拟电平包络速率（level_source=sim 时用）
@@ -266,6 +277,16 @@ SPEC = [
      "unit": "上限", "en_unit": "cap",
      "hint": "边光的亮度上限。1.0 是原始亮度，调低可以让整体更含蓄。",
      "en_hint": "Upper bound on the glow brightness. 1.0 is the original brightness; lower values make it subtler."},
+    {"key": "glow_scale", "tab": "扩散", "label": "辉光分辨率", "en_label": "Glow resolution",
+     "type": "int", "min": 2, "max": 8, "step": 1,
+     "unit": "倍", "en_unit": "x",
+     "hint": "数字越大越流畅但越糊。6 是流畅与画质的平衡点（实测 6fps -> 33fps）；3 画质最高但会掉帧。",
+     "en_hint": "Higher is smoother but blurrier. 6 balances smoothness and quality (measured 6 fps -> 33 fps); 3 looks best but drops frames."},
+
+    {"key": "dirty_rect", "tab": "扩散", "label": "只画脏矩形", "en_label": "Repaint dirty area only",
+     "type": "bool",
+     "hint": "边光只贴在四条边上，中间那片是透明的 —— 只重绘看得见的部分，帧率更高。画面完全一样。",
+     "en_hint": "The glow only hugs the screen edges; repainting only the visible part is faster. Same picture."},
 
     # ---------------- 跑马灯 / 画面
     {"key": "marquee_period_sec", "tab": "跑马灯", "label": "跑马灯一圈", "en_label": "Marquee lap",
@@ -541,12 +562,20 @@ def merge(base, new):
     return out
 
 
+LAST_ERROR = ""      # load() 读坏时的说明（设置页要显示红条；粘性，不自动清）
+
+
 def load(path=None):
     """读配置；坏文件不炸 —— 缺的值用 DEFAULTS 补齐。
 
     配置文件不存在时**自动落一份默认配置**：
     别人 clone 下来直接跑就行，不用先手动 copy config.example.json。
+
+    ⚠️ 读不出来时**先把原文件备份成 .bad-<时间戳>**再回退默认值：
+    不备份就直接回退的话，用户在设置面板点一次「保存」= 原配置被默认值覆盖，
+    而且**不可逆**（密钥、配色、开关全冲掉）。
     """
+    global LAST_ERROR
     path = path or CONFIG_PATH
     cfg = merge(DEFAULTS, {})
     if path == CONFIG_PATH and not os.path.exists(path):
@@ -557,10 +586,20 @@ def load(path=None):
     try:
         with io.open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            cfg = merge(cfg, data)
-    except Exception:
-        pass
+        if not isinstance(data, dict):
+            raise ValueError("配置的根节点不是对象")
+        cfg = merge(cfg, data)
+    except Exception as e:
+        # LAST_ERROR 是**粘性**的：后面读成功了也不清 ——
+        # 用户得知道「你刚才那份配置读不出来，已经被备份走了」。
+        LAST_ERROR = "配置读不出来：%r" % (e,)
+        try:
+            if os.path.exists(path):
+                bad = "%s.bad-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+                os.replace(path, bad)
+                LAST_ERROR += "（原文件已备份为 %s）" % os.path.basename(bad)
+        except Exception:
+            pass
     return cfg
 
 

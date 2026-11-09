@@ -52,7 +52,7 @@ def _api():
     for fn in ("waveInStart", "waveInReset", "waveInStop", "waveInClose"):
         getattr(w, fn).argtypes = [ctypes.c_void_p]
         getattr(w, fn).restype = ctypes.c_uint   # MMRESULT 没有 ctypes.wintypes 版本
-    for fn in ("waveInPrepareHeader", "waveInUnprepareHeader"):
+    for fn in ("waveInPrepareHeader", "waveInUnprepareHeader", "waveInAddBuffer"):
         getattr(w, fn).argtypes = [ctypes.c_void_p, ctypes.c_void_p, wt.DWORD]
         getattr(w, fn).restype = ctypes.c_uint
     return w
@@ -93,6 +93,19 @@ class MicMeter(object):
     def block(self):
         """采一块，返回 (rms, dbfs, peak)。"""
         self._prepare()
+        # ⚠️⚠️ **waveInAddBuffer 不能漏**（2026-11-08 实测的真 bug）。
+        #    漏了它，缓冲区就**从没进过设备的输入队列** —— 驱动压根不会去填它，
+        #    WHDR_DONE 永远不置位，我们每次只能等超时，然后读到一整块零。
+        #    症状特别像「麦克风坏了」：
+        #      - 每块耗时都是超时上限（50ms 的块要走 0.55s），
+        #      - rms / peak 全是**精确的 0**（真麦克风在安静房间也有底噪，不会是整 0），
+        #      - 扬声器放测试音也照样全 0。
+        #    加上这一行以后：每块 0.05s 完成，rms 正常、peak 正常。
+        rc = self.w.waveInAddBuffer(self.hIn, ctypes.byref(self.hdr),
+                                  ctypes.sizeof(self.hdr))
+        if rc != 0:
+            self._unprepare()
+            raise RuntimeError("waveInAddBuffer rc=%d" % rc)
         rc = self.w.waveInStart(self.hIn)
         if rc != 0:
             self._unprepare()
@@ -102,9 +115,10 @@ class MicMeter(object):
             if time.time() > deadline:
                 break
             time.sleep(0.003)
-        self.w.waveInReset(self.hIn)
         self.w.waveInStop(self.hIn)
+        # dwBytesRecorded 要在 reset **之前**读 —— waveInReset 会把它清零
         n = self.hdr.dwBytesRecorded or self.nbytes
+        self.w.waveInReset(self.hIn)
         self._unprepare()
         data = bytes(bytearray(self.buf[:n]))
         count = len(data) // 2

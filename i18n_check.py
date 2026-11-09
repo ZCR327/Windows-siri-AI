@@ -384,7 +384,7 @@ def _check_agent():
     ok(inside.startswith(base), "工作目录内的路径放行", "-> %s" % inside)
 
     # ---------------- 工具清单
-    ok(len(toolmod.TOOLS) == 28, "工具一共 28 个", "-> %d" % len(toolmod.TOOLS))
+    ok(len(toolmod.TOOLS) == 29, "工具一共 29 个", "-> %d" % len(toolmod.TOOLS))
     tnames = [t["name"] for t in toolmod.TOOLS]
     ok(len(set(tnames)) == len(tnames), "工具名不重复")
     for cat in toolmod.CATEGORIES:

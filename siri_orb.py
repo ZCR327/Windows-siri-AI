@@ -17,6 +17,7 @@ import sys
 import json
 import time
 import ctypes
+import math
 import traceback
 import subprocess
 
@@ -188,6 +189,98 @@ def _to_qimage(arr):
     return img.copy()
 
 
+def glow_visible_spans(al, thr=8, ts=8):
+    """量出一帧边光的**可见区域**，压成若干条横向区段（缓冲像素）。
+
+    返回 [(r0, r1, c0, c1), ...]（缓冲像素，r1/c1 是开区间）。
+
+    ⚠️ **不能只按外接矩形**：四角的热斑会沿对角线外扩，
+    外接矩形直接退化成整屏（2026-11-09 实测：按行取最大算出来的是
+    150/150/240/240 —— 也就是「整个缓冲都有内容」）。
+    所以改成**瓦片网格 + 逐行连通段**：既贴合真实形状，段数也只有 30 来个。
+
+    判据 alpha >= thr（默认 8/255 = 3%）：比这更淡的像素人眼分辨不出来，
+    那一大片区域**不用重绘**（重绘它只是白烧 CPU）。
+    """
+    h, w = int(al.shape[0]), int(al.shape[1])
+    spans = []
+    if h <= 0 or w <= 0:
+        return spans
+    # ⚠️ 网格必须**补齐**到 ts 的整数倍：直接按 h//ts*ts 截断的话，
+    #    最后那几行（150 行缓冲里正好是底边光带所在）就掉到网格外了，
+    #    那部分永远不会被重绘 —— 屏幕上会留一条不更新的旧边光。
+    hh = ((h + ts - 1) // ts) * ts
+    ww = ((w + ts - 1) // ts) * ts
+    if hh != h or ww != w:
+        padded = np.zeros((hh, ww), dtype=al.dtype)
+        padded[:h, :w] = al
+    else:
+        padded = al
+    tile = padded.reshape(hh // ts, ts, ww // ts, ts).max(axis=(1, 3))
+    dirty = tile >= thr
+    for i in range(dirty.shape[0]):
+        cols = np.flatnonzero(dirty[i])
+        if cols.size == 0:
+            continue
+        br = np.flatnonzero(np.diff(cols) > 1)
+        starts = [0] + (br + 1).tolist()
+        ends = br.tolist() + [cols.size - 1]
+        for s, e in zip(starts, ends):
+            spans.append((i * ts, (i + 1) * ts,
+                          int(cols[s]) * ts, int(cols[e]) * ts + ts))
+    return spans
+
+
+def glow_span_rects(spans, scale, w, h):
+    """区段（缓冲像素）-> 窗口坐标的矩形列表。"""
+    out = []
+    for r0, r1, c0, c1 in spans:
+        x = max(0, min(int(c0 * scale), w))
+        y = max(0, min(int(r0 * scale), h))
+        ww = max(0, min(int((c1 - c0) * scale), w - x))
+        hh = max(0, min(int((r1 - r0) * scale), h - y))
+        if ww <= 0 or hh <= 0:
+            continue
+        out.append(QtCore.QRect(x, y, ww, hh))
+    return out
+
+
+
+
+def _to_qimage_u8(arr):
+    """已经是 uint8 的 RGBA -> QImage（省掉一次 float<->uint8 来回转换）。"""
+    a = np.ascontiguousarray(arr)
+    h, w = a.shape[:2]
+    img = QtGui.QImage(a.data, w, h, w * 4, QtGui.QImage.Format_RGBA8888)
+    return img.copy()
+
+
+def _blur_u8(arr, radius):
+    """同 _blur，但直接吐 uint8 —— 热路径用。
+
+    以前是 uint8 -> float32 -> （QImage 那一步）再 uint8，
+    白白多两轮 57.6 万个浮点的转换。
+    """
+    a = (np.clip(arr, 0.0, 1.0) * 255.0).astype(np.uint8)
+    try:
+        from PIL import Image, ImageFilter
+    except Exception:
+        return a
+    im = Image.fromarray(a)
+    im = im.filter(ImageFilter.GaussianBlur(radius))
+    return np.array(im)
+
+
+def _blur_u8_buf(buf, radius):
+    """Blur an already-uint8 RGBA buffer and return a fresh uint8 array."""
+    try:
+        from PIL import Image, ImageFilter
+    except Exception:
+        return buf
+    im = Image.fromarray(buf)
+    return np.array(im.filter(ImageFilter.GaussianBlur(radius)))
+
+
 class GlowRenderer(object):
     """屏幕四周的弥散虹彩边光（第一版 Apple Intelligence）。
 
@@ -228,6 +321,16 @@ class GlowRenderer(object):
 
     def __init__(self, w, h, scale=3, origin=None, marquee_period=6.0, marquee_trail=0.09):
         self.w, self.h = w, h
+        # scale = 每个缓冲像素对应多少物理像素。缓冲是 1/scale 的分辨率。
+        # ⚠️ 屏幕多大 -> 缓冲多大：2880x1800 的屏在 scale=3 时缓冲是 960x600
+        #    （57.6 万像素），实测 render 要 149ms/帧，整机只有 6fps。
+        #    降分辨率是这里最大的一根杠杆（见 glow_scale 配置）。
+        self.scale = max(1, int(scale))
+        # 模糊半径按**物理像素**固定（原来 scale=3 时是 3.2 缓冲像素 = 9.6 物理像素），
+        # 换分辨率时观感才不变。
+        # ⚠️ 必须写成 3.2 * (3/scale) 而不是 9.6/scale：后者在 scale=3 时算出的是
+        #    3.1999999999999997，PIL 会按它取不同的核大小 -> 画面差 17 LSB。
+        self.blur_radius = 3.2 * (3.0 / float(self.scale))
         self.marquee_period = max(0.5, float(marquee_period))   # 跑马灯绕一圈几秒
         self.marquee_trail = max(0.02, float(marquee_trail))     # 尾巴长度（圈的比例）
         self.lw = max(24, w // scale)
@@ -246,6 +349,24 @@ class GlowRenderer(object):
             d = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) * scale
             dc = d if dc is None else np.minimum(dc, d)
         self.dcorner = dc
+
+        # ---- 每帧不变量：只算一次（2026-11-09 性能优化）----
+        # 这些量跟时间、跟状态都无关，每帧重算纯属浪费：
+        #   u          角向坐标（跑马灯的输入）
+        #   corner/ctip 四角热斑
+        #   core       白热核心
+        # 每帧少算 2 个 exp + 1 个 mod + 十几个数组 pass。
+        self._u = np.mod(self.theta - 0.125, 1.0).astype(np.float32)
+        self._corner = np.exp(-self.dcorner / 130.0).astype(np.float32)
+        self._ctip = (np.exp(-self.dcorner / 26.0) * 0.55).astype(np.float32)
+        self._core = np.exp(-np.maximum(self.dist - 1.0, 0.0) / 9.0).astype(np.float32)
+        # 白热核心的两个系数：每帧都要用，提前算好（省 2 个数组 pass）
+        self._core022 = (self._core * 0.22).astype(np.float32)
+        self._core030 = (self._core * 0.30).astype(np.float32)
+        # 输出缓冲：直接写 uint8 RGBA，省掉「float -> uint8 -> float」来回转换
+        self._out8 = np.zeros((self.lh, self.lw, 4), dtype=np.uint8)
+        self._rgb_tmp = np.empty((self.lh, self.lw, 3), dtype=np.float32)
+        self._a_tmp = np.empty((self.lh, self.lw), dtype=np.float32)
 
         # 按钮（波源）位置：默认放在任务栏右下角「电量与日期之间」那道缝里
         # （小米 AI 键在这台机器任务栏上的实际位置，按自己的键位改）。
@@ -272,14 +393,75 @@ class GlowRenderer(object):
         self._ye_s = np.concatenate((ss, [ss[0]]))
         self._me_s = np.concatenate((self._ps, [self._ps[0]]))
 
+        # ---- 颜色查找表（性能关键，别删）----
+        # 调色板只是 theta 的函数，跟时间无关 —— 时间只是让 theta 整体平移。
+        # 以前每帧对 14.4 万个像素各求一次 PCHIP 样条 + 一次 np.select 换色，
+        # 实测 **50ms/帧**，直接把 30fps 拖成 10fps（「扩散时掉帧」的根因）。
+        # 现在把「theta -> RGB」烘成一张表，每帧只做查表 + 线性插值。
+        # LUT_N=2048 时一格 = 1/2048 圈 = 0.18 度，肉眼绝对看不出来。
+        self.lut_n = 2048
+        _xs = np.arange(self.lut_n, dtype=np.float64) / self.lut_n
+        _hh, _ss = self._palette(_xs)
+        _rgb = _hsv(_hh, _ss, 1.0).astype(np.float32)
+        # 多存一格并复制首格 -> 取 i1 = i0+1 时永远合法，不用再取模
+        self._lut_r = np.concatenate((_rgb[:, 0], _rgb[:1, 0])).astype(np.float32)
+        self._lut_g = np.concatenate((_rgb[:, 1], _rgb[:1, 1])).astype(np.float32)
+        self._lut_b = np.concatenate((_rgb[:, 2], _rgb[:1, 2])).astype(np.float32)
+        self._rgb_cache = None
+        self._rgb_shift = 0.0
+        # 底光缓存（按电平分档）—— 扩散期电平是常数，这一整块每帧都白算
+        # ⚠️ ring / hot **也要缓存**：跑马灯分支（wave=None）要用它们。
+        #    缓存命中时这两个名字不会在本地重新赋值 -> 必须从缓存取回，
+        #    否则第二帧起就是 UnboundLocalError（听写/说话状态直接崩）。
+        self._base_key = None
+        self._fall = None
+        self._base = None
+        self._ring = None
+        self._hot = None
+
     def _palette(self, theta):
         """按 theta 返回 (色相, 饱和度)。"""
         h = _pchip_eval(self._xe, self._ye_h, self._me_h, theta)
         s = _pchip_eval(self._xe, self._ye_s, self._me_s, theta)
         return h, s
 
+    # 颜色场缓存的容差（圈）。LUT 一格 = 1/2048 = 0.000488 圈。
+    RGB_TOL = 0.0005
+
+    def _rgb_field(self, theta, shift):
+        """按 theta 取颜色场（带缓存）。
+
+        调色板只是 theta 的函数，跟时间无关 —— 时间只是让 theta 整体平移。
+        而且**颜色场不用每帧重算**：调色板漂移慢得离谱
+        （listening 0.0015 圈/秒、thinking 0.004 圈/秒，一帧才挪 0.00005~0.00013 圈），
+        超过 RGB_TOL（≈1 格 = 0.18 度）才刷新 —— 人眼绝对看不出来。
+        """
+        sh = float(shift) % 1.0
+        c = self._rgb_cache
+        if c is not None:
+            d = abs(sh - self._rgb_shift)
+            if d > 0.5:
+                d = 1.0 - d
+            if d < self.RGB_TOL:
+                return c
+        n = self.lut_n
+        u = np.mod(theta + sh, 1.0)
+        idx = u * n
+        i0 = idx.astype(np.int32)
+        f = (idx - i0).astype(np.float32)
+        i0 = np.mod(i0, n)
+        i1 = i0 + 1                      # LUT 多存一格并复制首格 -> 不用再取模
+        out = np.empty(theta.shape + (3,), dtype=np.float32)
+        for k, lut in enumerate((self._lut_r, self._lut_g, self._lut_b)):
+            v = np.take(lut, i0)
+            v1 = np.take(lut, i1)
+            out[..., k] = v + (v1 - v) * f
+        self._rgb_cache = out
+        self._rgb_shift = sh
+        return out
+
     def render(self, t, intensity, mode="listening", wave=None, marquee_gain=1.0,
-                level=0.0):
+                level=0.0, u8=False):
         d = self.dist
         # 录声时的麦克风电平（0..1）驱动边光**向内收缩**：
         # 声音越大 -> 辉光往里钻得越深、整体越亮；声音越小 -> 收回贴边。
@@ -289,43 +471,61 @@ class GlowRenderer(object):
         bright = 0.85 + 0.55 * lvl
         # 调色板整体极慢漂移，配色身份（紫顶/粉右/橙底）要一直保持住
         speed = {"listening": 0.0015, "thinking": 0.0040, "speaking": 0.0022}.get(mode, 0.0015)
-        hue, sat = self._palette(np.mod(self.theta + t * speed, 1.0))
-        rgb = _hsv(hue, sat, 1.0)
+        # ⚠️ 这里以前是「逐像素求 PCHIP 样条 + np.select 换色」= 50ms/帧
+        #    （float64 全程），是「扩散时掉帧」的头号根因。
+        #    现在走查表（见 _rgb_field），并且颜色场带缓存。
+        rgb = self._rgb_field(self.theta, t * speed)
 
         # u: 0=右下角, 0.125=下边, 0.25=左下, 0.375=左边, 0.5=左上角, ... 1=回到右下
-        u = np.mod(self.theta - 0.125, 1.0)
-        # ---- 角向跑马灯：一颗亮头 + 一条短尾，绕屏幕边缘追一圈 ----
-        # 一圈几秒由 config 的 marquee_period_sec 决定（thinking 更快、speaking 略快）
-        # 全程恒定速度：状态之间不再变速 —— 调速只有一个旋钮（marquee_period_sec），
-        # 也不会出现「听写时慢、说话时突然快起来」的不一致感
-        period = self.marquee_period
-        phase = (t / period) % 1.0                             # 亮头位置（顺时针：右下→下→左→上→右）
-
-        behind = np.mod(phase - u, 1.0)                         # 0=波头，越大越早被扫过
-        dist = np.minimum(behind, 1.0 - behind)                 # 到波头的最近距离
-
-        fall = np.exp(-np.maximum(d - 1.0, 0.0) / (50.0 * depth_scale))   # 边缘弥散（随音量变深）
-        corner = np.exp(-self.dcorner / 130.0)                   # 四角热斑
-        ctip = np.exp(-self.dcorner / 26.0) * 0.55               # 角上最亮的核心
-
+        u = self._u
         # 两层结构：
         #   base = 常驻底光（整圈一直有一层淡虹彩，扫完不会黑掉）
         #   wave_env = 行进波包络（只跟着波头走）
         # 单层 exp 衰减要么拖尾铺满一圈、要么远处直接黑掉，两层才兼顾得了。
-        ring = fall * 0.50 * bright                            # 边缘弥散（随音量变亮）
-        hot = (corner * 0.40 + ctip * 0.25) * bright            # 四角热斑
-        base = (ring + hot) * 0.45                              # 常驻底光（保证扫完不黑）
-        wave_env = ring * 0.75 + hot * 1.00                     # 行进波包络（更亮）
+        #
+        # ⚠️ fall / ring / hot / base **只跟电平有关**，跟时间、跟波前都无关。
+        #    扩散期电平是常数，这一整块（1 个 exp + 12 个数组 pass）每帧重算纯属浪费
+        #    —— 按电平分档缓存，命中就省 4~5ms/帧。
+        key = round(lvl, 3)
+        if key != self._base_key:
+            fall = np.exp(-np.maximum(d - 1.0, 0.0) / (50.0 * depth_scale))
+            ring = fall * 0.50 * bright                        # 边缘弥散（随音量变亮）
+            hot = (self._corner * 0.40 + self._ctip * 0.25) * bright   # 四角热斑
+            self._fall = fall
+            self._fall_scaled = (0.03 + 0.62 * fall).astype(np.float32)
+            self._base = (ring + hot) * 0.45                    # 常驻底光（保证扫完不黑）
+            self._ring = ring
+            self._hot = hot
+            self._base_key = key
+        fall = self._fall
+        base = self._base
+        ring = self._ring
+        hot = self._hot
 
         # 跑马灯本体：亮头窄（sigma 0.05 ≈ 1/20 圈）、尾巴短（exp 衰减，约 30°）。
         # 尾巴必须收住 —— 太长就像拖了一条脏尾巴（用户反馈过「拖尾太长」）。
-        sigma = 0.05
-        trail = np.exp(-behind / self.marquee_trail)
-        crest = np.exp(-(dist / sigma) ** 2)                     # 亮头
-        rim_hi = np.exp(-((dist - sigma * 0.90) / (sigma * 0.40)) ** 2)   # 亮头前沿高光
+        #
+        # ⚠️ **只在真的要用的时候才算**：
+        #    扩散期（wave 不为 None）跑马灯增益是 0，跑马灯根本没被用到 ——
+        #    3 个 exp + 十几个数组 pass 全是白算，而那正好是「扩散时掉帧」最痛的 0.7 秒。
+        #    以前这里是无条件每帧算的。
         g = max(0.0, float(marquee_gain))
-        marquee = (wave_env * (0.34 * trail + 0.90 * crest)
-                   + wave_env * rim_hi * 0.25) * g
+        marquee = 0.0
+        if g > 0.0 and wave is None:
+            # 一圈几秒由 config 的 marquee_period_sec 决定（thinking 更快、speaking 略快）
+            # 全程恒定速度：状态之间不再变速 —— 调速只有一个旋钮（marquee_period_sec），
+            # 也不会出现「听写时慢、说话时突然快起来」的不一致感
+            period = self.marquee_period
+            phase = (t / period) % 1.0                     # 亮头位置（顺时针：右下→下→左→上→右）
+            behind = np.mod(phase - u, 1.0)                 # 0=波头，越大越早被扫过
+            dist = np.minimum(behind, 1.0 - behind)         # 到波头的最近距离
+            sigma = 0.05
+            trail = np.exp(-behind / self.marquee_trail)
+            crest = np.exp(-(dist / sigma) ** 2)             # 亮头
+            rim_hi = np.exp(-((dist - sigma * 0.90) / (sigma * 0.40)) ** 2)   # 亮头前沿高光
+            wave_env = ring * 0.75 + hot * 1.00             # 行进波包络（更亮）
+            marquee = (wave_env * (0.34 * trail + 0.90 * crest)
+                       + wave_env * rim_hi * 0.25) * g
 
         lit = 1.0
         if wave is None:
@@ -338,26 +538,45 @@ class GlowRenderer(object):
             R = wave["radius"]
             bw = wave["width"]
             db = self.dbtn
+            inv_bw = 1.0 / max(1e-3, bw)
             # 波前扫过之后该点才被点亮，前沿用 smoothstep 过渡
-            lit = np.clip((R - db) / bw + 0.5, 0.0, 1.0)
-            lit = lit * lit * (3.0 - 2.0 * lit)
-            a = a * lit
+            lit = np.clip((R - db) * inv_bw + 0.5, 0.0, 1.0)
+            # smoothstep: t*t*(3-2t) —— ⚠️ 右边必须用**原始** t，
+            # 就地平方会让 (3-2t) 用到平方后的值，曲线就变了。
+            _sq = lit * lit
+            lit = _sq * (3.0 - 2.0 * lit)
+            a *= lit
             # 跟着波前走的光带：前侧宽、后侧窄 -> 拖尾更短
+            # （原来每帧做除法 + where 两个 pass；改成乘倒数 + 一个系数表）
             dd = db - R
-            bl = np.where(dd > 0.0, bw, bw * 0.5)
-            band = np.exp(-(dd / bl) ** 2)
-            a = a + band * (0.03 + 0.62 * fall) * intensity   # 光带本体
-            rgb = np.clip(rgb + (band * 0.26)[..., None], 0.0, 1.0)
+            uu = dd * inv_bw
+            # ⚠️ 这里**必须是 float32**：用 Python 浮点 1.0/4.0 的话，
+            #    np.where 会给 float64 -> band 变双精度 -> 后面 a / rgb 全被拖成
+            #    float64，连 exp 都跑双精度（慢一倍、内存流量翻倍）。
+            #    整条链本来就是 float32，别在中间破一次。
+            k = np.where(dd > 0.0, np.float32(1.0), np.float32(4.0))
+            band = np.exp(-(uu * uu) * k)
+            a += band * (self._fall_scaled * intensity)   # 光带本体
+            # ⚠️ 这里不再 clip：最后统一 clip 一次，结果一模一样（加的都是非负量）
+            rgb = rgb + (band * 0.26)[..., None]
 
         # 白热核心：官方复刻是 inset 0 36px 64px -28px -> 8px 实心核 + 一层白雾，
         # 参考视频里边缘最内侧确实压着一条白亮带（不是纯彩色边线）。
-        core = np.exp(-np.maximum(d - 1.0, 0.0) / 9.0)
-        a = a + core * 0.22 * intensity * lit
-        rgb = np.clip(rgb + (core * 0.30 * lit)[..., None], 0.0, 1.0)
+        a = a + self._core022 * intensity * lit
+        rgb = rgb + (self._core030 * lit)[..., None]
 
-        a = np.clip(a, 0.0, 1.0)
+        np.clip(a, 0.0, 1.0, out=a)
+        if u8:
+            # 直接写 uint8 RGBA：省掉 concatenate 整块拷贝 + float->uint8 的来回转换
+            out8 = self._out8
+            np.clip(rgb, 0.0, 1.0, out=self._rgb_tmp)   # rgb 可能是缓存数组，不能就地改
+            np.multiply(self._rgb_tmp, 255.0, out=self._rgb_tmp)
+            np.copyto(out8[..., 0:3], self._rgb_tmp, casting='unsafe')
+            np.multiply(a, 255.0, out=self._a_tmp)
+            np.copyto(out8[..., 3], self._a_tmp, casting='unsafe')
+            return _blur_u8_buf(out8, self.blur_radius)
         out = np.concatenate([np.clip(rgb, 0.0, 1.0), a[..., None]], axis=-1)
-        return _blur(out, 3.2)
+        return _blur(out, self.blur_radius)
 
 
 class OrbRenderer(object):
@@ -390,12 +609,119 @@ class OrbRenderer(object):
         return _blur(out, 7.0)
 
 
+def _weather_cloud_path(x, y, w, h):
+    """一朵云（几个椭圆 + 一条圆角底，同向子路径在 WindingFill 下自然并成一体）。"""
+    path = QtGui.QPainterPath()
+    path.addEllipse(QtCore.QRectF(x, y + h * 0.30, w * 0.52, h * 0.52))
+    path.addEllipse(QtCore.QRectF(x + w * 0.20, y + h * 0.04, w * 0.56, h * 0.64))
+    path.addEllipse(QtCore.QRectF(x + w * 0.46, y + h * 0.26, w * 0.54, h * 0.56))
+    path.addRoundedRect(QtCore.QRectF(x + w * 0.08, y + h * 0.52, w * 0.84, h * 0.44),
+                        h * 0.22, h * 0.22)
+    return path
+
+
+def _draw_weather_icon(p, kind, x, y, size):
+    """天气图标：纯 QPainter 画。
+
+    不用 emoji —— 这台机器上 emoji 走彩色字形，尺寸和配色都不受控，
+    也不跟面板的白灰配色搭。
+    """
+    white = QtGui.QColor(243, 245, 250, 240)
+    blue = QtGui.QColor(126, 196, 255, 235)
+    if kind == "sun":
+        r = size * 0.26
+        cx, cy = x + size / 2.0, y + size / 2.0
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 214, 120, 240))
+        p.drawEllipse(QtCore.QRectF(cx - r, cy - r, r * 2, r * 2))
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 214, 120, 220),
+                            max(1.5, size * 0.055), QtCore.Qt.SolidLine,
+                            QtCore.Qt.RoundCap))
+        for i in range(8):
+            a = i * math.pi / 4.0
+            r0, r1 = r * 1.5, r * 2.1
+            p.drawLine(QtCore.QPointF(cx + math.cos(a) * r0, cy + math.sin(a) * r0),
+                       QtCore.QPointF(cx + math.cos(a) * r1, cy + math.sin(a) * r1))
+        return
+    if kind == "cloud_sun":
+        r = size * 0.17
+        cx, cy = x + size * 0.27, y + size * 0.25
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 214, 120, 235))
+        p.drawEllipse(QtCore.QRectF(cx - r, cy - r, r * 2, r * 2))
+        p.setBrush(white)
+        p.drawPath(_weather_cloud_path(x + size * 0.16, y + size * 0.30,
+                                       size * 0.84, size * 0.70))
+        return
+    if kind == "fog":
+        p.setPen(QtGui.QPen(QtGui.QColor(226, 230, 240, 225),
+                            max(1.5, size * 0.075), QtCore.Qt.SolidLine,
+                            QtCore.Qt.RoundCap))
+        for i in range(4):
+            yy = y + size * (0.24 + i * 0.19)
+            p.drawLine(QtCore.QPointF(x + size * 0.08, yy),
+                       QtCore.QPointF(x + size * 0.92, yy))
+        return
+    # 其余都是「云 + 降水/雷电」
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(white)
+    p.drawPath(_weather_cloud_path(x, y, size, size * 0.62))
+    if kind == "rain":
+        p.setPen(QtGui.QPen(blue, max(1.5, size * 0.07), QtCore.Qt.SolidLine,
+                            QtCore.Qt.RoundCap))
+        for fx in (0.26, 0.50, 0.74):
+            x0, y0 = x + size * fx, y + size * 0.66
+            p.drawLine(QtCore.QPointF(x0, y0),
+                       QtCore.QPointF(x0 - size * 0.07, y0 + size * 0.20))
+    elif kind == "snow":
+        p.setPen(QtGui.QPen(QtGui.QColor(214, 236, 255, 235),
+                            max(1.2, size * 0.055), QtCore.Qt.SolidLine,
+                            QtCore.Qt.RoundCap))
+        for fx in (0.28, 0.52, 0.76):
+            cx, cy = x + size * fx, y + size * 0.78
+            for a in (0.0, math.pi / 2.0):
+                dx, dy = math.cos(a) * size * 0.08, math.sin(a) * size * 0.08
+                p.drawLine(QtCore.QPointF(cx - dx, cy - dy),
+                           QtCore.QPointF(cx + dx, cy + dy))
+    elif kind == "thunder":
+        bolt = QtGui.QPainterPath()
+        bx, by = x + size * 0.46, y + size * 0.60
+        bolt.moveTo(bx + size * 0.06, by)
+        bolt.lineTo(bx - size * 0.04, by + size * 0.16)
+        bolt.lineTo(bx + size * 0.03, by + size * 0.16)
+        bolt.lineTo(bx - size * 0.05, by + size * 0.36)
+        bolt.lineTo(bx + size * 0.10, by + size * 0.18)
+        bolt.lineTo(bx + size * 0.03, by + size * 0.18)
+        bolt.closeSubpath()
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 210, 110, 240))
+        p.drawPath(bolt)
+
+
+def _draw_pin(p, x, y, s):
+    """城市后面那个定位小箭头（iOS 那种实心小箭头）。"""
+    path = QtGui.QPainterPath()
+    path.moveTo(x, y - s * 0.5)
+    path.lineTo(x + s * 0.44, y + s * 0.44)
+    path.lineTo(x, y + s * 0.18)
+    path.lineTo(x - s * 0.44, y + s * 0.44)
+    path.closeSubpath()
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(QtGui.QColor(120, 200, 255, 230))
+    p.drawPath(path)
+
+
 class Overlay(QtWidgets.QWidget):
     # 触发键的回调跑在 keyhook 线程上，GUI 的活必须靠这个信号搬回主线程
     sig_trigger = QtCore.pyqtSignal()
 
     # 麦克风电平（0..1）：由听写线程发出，驱动边光向内收缩
     sig_level = QtCore.pyqtSignal(float)
+
+    # 天气面板的数据（工具线程 -> GUI 线程）
+    # ⚠️ 必须走信号：天气工具跑在 agent 的工作线程里，
+    #    直接调 GUI 方法会被 Qt 丢掉（卡片不重绘 = 面板不上屏）。
+    sig_weather = QtCore.pyqtSignal(object)
 
     def do_winh(self):
         """Win+H 流程 —— **必须在 GUI 线程里跑**。
@@ -449,15 +775,52 @@ class Overlay(QtWidgets.QWidget):
         self.press_time = None
         self.glow_img = None
         self.orb_img = None
+        # ---- 局部重绘（只画脏矩形）----
+        # 边光只贴在四条边上，中间那一大片是透明的 —— 整屏重绘纯属浪费。
+        self._spans = None       # 这一帧看得见的区段（缓冲像素）
+        self._prev_spans = None   # 上一帧的区段（也得重画，免得留残影）
+        self._force_full = 0      # 还差几帧要整屏重绘（波环收尾用）
+        self._wave_rect = None    # 波环占据的矩形
+        # 天气面板（Live Activity 式）：有值时卡片画天气而不是文字
+        self.weather = None
+        # 面板答完话后还留在屏幕上的截止时间（0 = 不留）
+        self._weather_until = 0.0
+        # 用户这一轮问的原话 —— 天气面板的标题用它
+        self.last_question = ""
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.timer.start(33)
+        self._fps_n = 0
+        self._rnd_ms = 0.0
+        self._fps_mark = time.time()
+        # ---- 帧率诊断（2026-11-09）----
+        # 「画一帧」和「算一帧」分开量，才知道钱在哪：
+        #   render = 算（numpy + PIL，在我们的进程里）
+        #   paint  = 画（GUI 线程）+ Windows 分层窗口合成/上传（内核/DWM）
+        # 实测（1440x900 / scale=6）：render 8ms、paint ~13.5ms
+        #   -> 合成层那 13.5ms **多核碰不到**（不在我们进程里）。
+        self._applied = 0      # 真正上屏的帧数
+        self._paint_ms = 0.0   # 画一帧累计耗时
+        self._paint_n = 0
+        # 30fps 是自己给自己限速：屏幕是 90Hz，定时器 33ms 等于白扔 2/3 的帧。
+        # 真正的上限由「一帧要多久」决定（render + 光栅 + 分层窗口上传）。
+        self.timer.start(11)
 
     def set_state(self, state):
         if state != self.state:
+            old = self.state
             self.state = state
             self.state_since = time.time()
+            if state == "idle":
+                # 一轮结束：**不立刻收掉天气面板** —— 照 iOS Live Activity 的做法，
+                # 答完话面板还留在屏幕上（weather_linger_sec），到点自己收。
+                if self.weather:
+                    self._weather_until = time.time() + float(
+                        self.cfg.get("weather_linger_sec", 25) or 25)
+            elif old == "idle" and self.weather:
+                # 新的一轮开始了：上一轮的面板作废
+                self.weather = None
+                self._weather_until = 0.0
             self._sync_card()
 
     def set_card(self, card):
@@ -526,6 +889,7 @@ class Overlay(QtWidgets.QWidget):
         th = getattr(self, "_ask_thread", None)
         if th is not None and th.isRunning():
             return
+        self.last_question = text            # 天气面板的标题就是这一句
         try:
             t = ReplyThread(text, self.cfg, self.llm, parent=self)
             t.sig_ui.connect(self.set_ui)
@@ -588,10 +952,35 @@ class Overlay(QtWidgets.QWidget):
         return max(0.0, min(1.0, env))
 
     def set_caption(self, text):
+        if self.weather:
+            # 天气面板在场时，模型的文字回答不抢版面
+            # （跟 iOS 的 Live Activity 一个做法：结构化面板就是答案，文字只播报）
+            # ⚠️ 连 idle 时那句空文案也要挡 —— 挡了卡片才不会被收掉，
+            #    面板才能按 iOS 的样子在屏幕上多留一会儿。
+            return
         self.caption = text or ""
         if text:
             self.caption_since = time.time()
         self._sync_card()
+
+    def set_weather(self, payload):
+        """把天气数据推上屏幕（Live Activity 式面板）。
+
+        ⚠️ 只准在 GUI 线程里调 —— 工作线程请走 sig_weather.emit()。
+        """
+        if not payload:
+            return
+        self.weather = dict(payload)
+        # 标题 = 用户这一轮的原话；没有就用城市名兜底
+        #（空标题会让卡片被收掉，面板就看不见了）
+        self.caption = self.last_question or self.weather.get("city") or ""
+        self.caption_since = time.time()
+        self._weather_until = 0.0
+        _trace("weather panel set: %s %s/%s %s" % (
+            self.weather.get("city"), self.weather.get("hi"),
+            self.weather.get("lo"), self.weather.get("text")))
+        self._sync_card()
+        self.update()
 
     def set_ui(self, state, text):
         """状态与文案一起更新，避免两者错位。"""
@@ -680,6 +1069,13 @@ class Overlay(QtWidgets.QWidget):
             self.level += (self.level_target - self.level) * 0.08
         if st == "idle" and self.caption and (now - self.caption_since) > 3.2:
             self.set_caption("")
+        if (st == "idle" and self.weather and self._weather_until
+                and now > self._weather_until):
+            # 面板 linger 到了：收掉，卡片跟着走
+            self.weather = None
+            self._weather_until = 0.0
+            self.caption = ""
+            self._sync_card()
         if target > self.glow:
             self.glow += (target - self.glow) * 0.35
         else:
@@ -688,54 +1084,198 @@ class Overlay(QtWidgets.QWidget):
         origin = self._origin()
         mq_period = float(self.cfg.get("marquee_period_sec", 6.0))
         mq_trail = float(self.cfg.get("marquee_trail", 0.09))
-        if not hasattr(self, "_gr") or self._gr.w != self.width() \
+        # glow_scale：每个缓冲像素对应多少物理像素。
+        # 6 = 缓冲 480x300（2880x1800 的屏）。实测 render 149ms -> 25ms，整机 6fps -> 25fps。
+        # 想吃满画质改成 3（缓冲 960x600），代价是帧率掉到 6fps。
+        gscale = max(2, int(self.cfg.get("glow_scale", 6) or 6))
+        if getattr(self, "_gr", None) is None or self._gr.w != self.width() \
                 or self._gr.h != self.height() \
+                or self._gr.scale != gscale \
                 or self._gr.origin != origin \
                 or self._gr.marquee_period != max(0.5, mq_period) \
                 or self._gr.marquee_trail != max(0.02, mq_trail):
-            self._gr = GlowRenderer(self.width(), self.height(), origin=origin,
+            self._gr = GlowRenderer(self.width(), self.height(), scale=gscale,
+                                    origin=origin,
                                     marquee_period=mq_period, marquee_trail=mq_trail)
             self._or = OrbRenderer(256)
 
         # ---- 径向扩散波前 ----
-        wave = None
         delay = float(self.cfg.get("wave_delay_sec", 0.2))
         sweep = float(self.cfg.get("wave_sweep_sec", 0.5))
+        band_w = max(30.0, self.width() * float(self.cfg.get("wave_band_frac", 0.032)))
+        wave, marquee_gain = self._wave_state(now, self.press_time, delay, sweep,
+                                              self._gr.max_r, band_w)
+
+        if self.glow > 0.012:
+            cap = float(self.cfg.get("glow_intensity", 1.0) or 1.0)
+            intensity = max(0.0, min(1.0, self.glow * cap))
+            # ⚠️ 渲染**必须留在 GUI 线程**。2026-11-09 实测过「挪到工作线程」：
+            #    Python 的 GIL 让它没法和 Qt 画图重叠，反而**两边都变慢**：
+            #    render 8ms -> 56.9ms、paint 13.5ms -> 41.1ms、45fps -> 16fps。
+            #    原因：numpy 每个 ufunc 都要重新抢一次 GIL（默认切换间隔 5ms），
+            #    一帧二十多次来回 = 五十几毫秒的「护航效应」。
+            #    -> 要提速只能**减少总工作量**（少画 / 少算），不能靠并行。
+            _r0 = time.perf_counter()
+            _arr = self._gr.render(now - self.t0, intensity, st, wave, marquee_gain,
+                                   self.level, u8=True)
+            self.glow_img = _to_qimage_u8(_arr)
+            # 只画看得见的那几条边带 -> 先量出可见范围（按 alpha 算）
+            self._spans = self._spans_from(_arr)
+            self._wave_rect = self._wave_bbox(wave)
+            # 真实帧率 + render 耗时：以前只能靠猜（定时器 33ms 把一切伪装成 30fps）
+            self._fps_n += 1
+            self._applied += 1
+            self._rnd_ms += (time.perf_counter() - _r0) * 1000.0
+            if now - self._fps_mark > 2.0:
+                _span = max(1e-3, now - self._fps_mark)
+                _trace("perf: %.1f fps(img) | %.1f fps(tick) | render %.1f ms"
+                       " | paint %.1f ms | scale=%d"
+                       % (self._applied / _span,
+                          self._fps_n / _span,
+                          self._rnd_ms / max(1, self._applied),
+                          self._paint_ms / max(1, self._paint_n),
+                          getattr(getattr(self, "_gr", None), "scale", 0)))
+                self._fps_n = 0
+                self._applied = 0
+                self._rnd_ms = 0.0
+                self._paint_ms = 0.0
+                self._paint_n = 0
+                self._fps_mark = now
+            if self.cfg.get("show_orb", False):
+                self.orb_img = _to_qimage(self._or.render(t, self.glow, st))
+            else:
+                self.orb_img = None
+            self._watchdog(now)
+            self._repaint(self._dirty_rects())
+        else:
+            # ⚠️ 什么都不亮就别 update() —— 覆盖层是**全屏半透明**窗口，
+            #    每次 update() 都得让 DWM 重新合成一整层 2880x1800 的透明层。
+            #    以前空闲时也一直重绘，实测白烧 **25% 单核**（2026-11-09 实测）。
+            if self.glow_img is not None:
+                self.glow_img = None
+                self.orb_img = None
+                # 收工要**整屏**擦干净（边带之外可能还留着波环的残影）
+                self._prev_spans = None
+                self._spans = None
+                self._force_full = 0
+                self.update()
+            self._watchdog(now)
+
+    def _wave_state(self, now, press_time, delay, sweep, max_r, band_w):
+        """径向扩散波前 + 跑马灯增益。**在工作线程里算**，时间基准取 worker 自己的钟。
+
+        为什么必须在 worker 里算：波前 0.5 秒扫完全屏（≈3180 物理 px/s），
+        流水线会引入 ~20ms 的滞后 —— 拿 GUI 线程的时间去算，
+        光带会明显落后于按钮位置（滞后量比光带本身还宽）。
+        取 worker 真正开算的那一刻为准，滞后就只剩显示本身的延迟。
+        """
+        wave = None
         marquee_gain = 1.0
-        if self.press_time is not None:
-            bw = max(30.0, self.width() * float(self.cfg.get("wave_band_frac", 0.032)))
-            wt = now - self.press_time - delay
+        if press_time is not None:
+            wt = now - press_time - delay
             if wt < 0.0:
                 # 延迟期：光还没开始，按钮先亮（radius 取负 -> 整圈不亮）
-                wave = {"radius": -1.0e9, "width": bw}
+                wave = {"radius": -1.0e9, "width": band_w}
             elif wt < sweep:
                 tau = wt / max(1e-3, sweep)
                 ease = 1.0 - (1.0 - tau) ** 1.7
-                wave = {"radius": self._gr.max_r * ease, "width": bw}
+                wave = {"radius": max_r * ease, "width": band_w}
             if wave is not None:
                 # 扩散期不开跑马灯（那 0.6 秒的主角是径向波）；
                 # 扩散结束后 0.35s 内淡入，否则会「啪」地闪一下
                 marquee_gain = 0.0
             else:
-                end = self.press_time + delay + sweep
+                end = press_time + delay + sweep
                 marquee_gain = min(1.0, max(0.0, (now - end) / 0.35))
+        return wave, marquee_gain
 
-        if self.glow > 0.012:
-            cap = float(self.cfg.get("glow_intensity", 1.0) or 1.0)
-            intensity = max(0.0, min(1.0, self.glow * cap))
-            self.glow_img = _to_qimage(
-                self._gr.render(t, intensity, st, wave, marquee_gain, self.level))
-            if self.cfg.get("show_orb", False):
-                self.orb_img = _to_qimage(self._or.render(t, self.glow, st))
-            else:
-                self.orb_img = None
-        else:
-            self.glow_img = None
-            self.orb_img = None
-        self._watchdog(now)
-        self.update()
+    # ---------------------------------------------------------- 局部重绘
+    def _spans_from(self, arr):
+        """可见区段（缓冲像素）—— 算法在模块级 glow_visible_spans，便于无 GUI 自检。"""
+        thr = int(self.cfg.get("dirty_thr", 8) or 8)
+        ts = int(self.cfg.get("dirty_tile", 8) or 8)
+        return glow_visible_spans(arr[..., 3], thr, ts)
+
+    def _wave_bbox(self, wave):
+        """扩散波环占据的矩形（窗口坐标）；没有波环返回 None。
+
+        波环是大圆环，外接矩形几乎覆盖整屏 —— 所以扩散期间干脆整屏重绘
+        （那时候本来也没有省下来的空间）。
+        """
+        if wave is None:
+            return None
+        r = float(wave.get("radius", 0.0))
+        w = float(wave.get("width", 0.0))
+        if r < -1e8:
+            return None
+        ox, oy = self._origin()
+        rc = QtCore.QRect(int(ox - r - w), int(oy - r - w),
+                          int(2 * (r + w)), int(2 * (r + w)))
+        return rc.intersected(self.rect())
+
+    def _dirty_rects(self):
+        """这一帧要重绘的矩形列表；None = 整屏重绘。
+
+        2026-11-09 实测（1440x900 / scale=6，探针 A/B）：
+          整屏 paint 27.7ms -> 只画四条边带 13.0ms（正好是面积比 47%）。
+        ⚠️ 但**上传**（UpdateLayeredWindow）用的是脏区的**外接矩形**，
+        四条带的外接矩形还是整屏 —— 所以省下的是光栅那一半，
+        上传那一半还在（Windows 的限制，不是 Qt 的）。
+        """
+        if not bool(self.cfg.get("dirty_rect", True)):
+            self._prev_spans = None
+            return None
+        spans = self._spans
+        if spans is None:
+            return None
+        if self._wave_rect is not None:
+            # 波环期间整屏重绘；波环刚消失的那一帧也要整屏重绘一次，
+            # 否则环的残影会留在屏幕中间。
+            self._force_full = 1
+            self._prev_spans = None
+            return None
+        if self._force_full > 0:
+            self._force_full -= 1
+            self._prev_spans = None
+            return None
+        gr = getattr(self, "_gr", None)
+        s = float(getattr(gr, "scale", 6) or 6)
+        W = int(self.width())
+        H = int(self.height())
+        rects = glow_span_rects(spans, s, W, H)
+        prev = self._prev_spans
+        if prev:
+            # 上一帧画过的地方这一帧也要重画 —— 光会往里缩，
+            # 只画新出现的那一圈的话，外侧会留一圈脏边。
+            rects += glow_span_rects(prev, s, W, H)
+        # 按钮（波源）在右下角、光球在底部中间 —— 它们不是缓冲里的内容，
+        # 得单独把范围算进脏区。
+        ox, oy = self._origin()
+        rects.append(QtCore.QRect(int(ox) - 26, int(oy) - 26, 52, 52)
+                     .intersected(self.rect()))
+        if self.orb_img is not None:
+            sz = int(self.cfg.get("orb_size", 200) or 200)
+            mg = int(self.cfg.get("orb_bottom_margin", 92) or 92)
+            rects.append(QtCore.QRect(int(self.width() / 2) - sz // 2 - 4,
+                                      H - mg - sz - 4, sz + 8, sz + 8))
+        self._prev_spans = spans
+        return rects
+
+    def _repaint(self, rects):
+        """按脏区重绘；rects=None 就是整屏重绘。
+
+        Qt 会用**脏区**去 clip 画笔 —— 实测 clip 确实生效：
+        只画底部 300px 那一条时，paint 从 27.7ms 掉到 9.1ms（面积比 33%）。
+        """
+        if rects is None:
+            self.update()
+            return
+        for rc in rects:
+            if rc.width() > 0 and rc.height() > 0:
+                self.update(rc)
 
     def paintEvent(self, ev):
+        _p0 = time.perf_counter()
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
         p.setRenderHint(QtGui.QPainter.Antialiasing, True)
@@ -750,6 +1290,9 @@ class Overlay(QtWidgets.QWidget):
                 p.drawImage(QtCore.QRect(x, y, s, s), self.orb_img)
         # 卡片已经移到独立的 CardWindow（要能点、能编辑），这里不再画
         p.end()
+        # 画一帧要多久 —— 这是流水线的另一半（render 在工作线程，这里是 GUI 线程）
+        self._paint_ms += (time.perf_counter() - _p0) * 1000.0
+        self._paint_n += 1
 
     def _draw_button(self, p):
         """按钮本体：按下即亮，作为光带的起点（参考视频里是侧边按键）。"""
@@ -790,11 +1333,16 @@ class Overlay(QtWidgets.QWidget):
                              int(QtCore.Qt.TextWordWrap), self.caption)
         label = i18n.state_text(i18n.ui_lang(self.cfg), self.state)
         label_h = 24 if label else 0
-        if pos == "top":
-            w = min(maxw, max(560, br.width() + 84))
+        if self.weather:
+            # 天气面板：外面一个大圆角块，里面再套一个（照 iOS Live Activity 的版式）
+            w = min(maxw, max(680, 860))
+            h = 158 + label_h
         else:
-            w = min(maxw, max(260, br.width() + 56))
-        h = br.height() + 44 + label_h
+            if pos == "top":
+                w = min(maxw, max(560, br.width() + 84))
+            else:
+                w = min(maxw, max(260, br.width() + 56))
+            h = br.height() + 44 + label_h
         x = (self.width() - w) // 2
         if pos == "top":
             y = 44
@@ -814,10 +1362,17 @@ class Overlay(QtWidgets.QWidget):
         p.setPen(QtCore.Qt.NoPen)
         p.setBrush(QtGui.QColor(0, 0, 0, 60))
         p.drawRoundedRect(rect.adjusted(-8, -8, 8, 8), 26, 26)
-        p.setBrush(QtGui.QColor(20, 20, 26, 198))
+        # ⚠️ 卡片底色要够实 —— 200/198 太透，背后的字会清清楚楚透出来，
+        #    看着像「贴了层滤镜」而不是 iOS 那种 Live Activity 材质（2026-11-08 实测）。
+        p.setBrush(QtGui.QColor(18, 18, 24, 240))
         p.drawRoundedRect(rect, 18, 18)
         p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 44), 1))
         p.drawRoundedRect(rect, 18, 18)
+
+        if self.weather:
+            # 天气面板：标题 + 内层圆角块（状态字挪到标题行右边）
+            self._draw_weather(p, rect, label, label_h)
+            return
 
         if label:
             dot = QtGui.QColor(120, 220, 255) if self.state != "thinking" else QtGui.QColor(255, 190, 110)
@@ -844,6 +1399,98 @@ class Overlay(QtWidgets.QWidget):
             p.drawText(rect.adjusted(28, 18 + label_h, -28, -14),
                        QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop | QtCore.Qt.TextWordWrap,
                        self.caption)
+
+    def _draw_weather(self, p, rect, label, label_h):
+        """Live Activity 式天气面板（版式照 iOS 18 的天气实时活动）。
+
+            ┌ 外层大圆角块 ────────────────────┐
+            │ 今天天气怎么样 ↗        ● 说话中 │  ← 标题 = 你问的那句
+            │ ┌ 内层圆角块 ─────────────────┐ │
+            │ │ 上海市📍            [☁]     │ │
+            │ │ 18° 14°              微雨   │ │
+            │ │                        今天   │ │
+            │ └────────────────────────────┘ │
+            └─────────────────────────────────┘
+        """
+        lang = i18n.ui_lang(self.cfg)
+        w = rect.width()
+        title = self.caption or ""
+
+        # ---- 标题行：左边是你的问题，右边是状态
+        tf = QtGui.QFont("Microsoft YaHei UI", 10)
+        p.setFont(tf)
+        p.setPen(QtGui.QColor(238, 240, 247, 238))
+        p.drawText(QtCore.QRectF(rect.left() + 26, rect.top() + 12, w - 170, 24),
+                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, title)
+        if title:
+            # 标题后面那个「↗」（参考里就有）
+            tx = rect.left() + 26 + QtGui.QFontMetrics(tf).horizontalAdvance(title) + 6
+            p.setPen(QtGui.QColor(214, 218, 230, 190))
+            p.drawText(QtCore.QRectF(tx, rect.top() + 12, 24, 24),
+                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, "↗")
+        if label:
+            dot = (QtGui.QColor(120, 220, 255) if self.state != "thinking"
+                   else QtGui.QColor(255, 190, 110))
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(dot)
+            p.drawEllipse(QtCore.QRectF(rect.right() - 124, rect.top() + 19, 8, 8))
+            p.setFont(QtGui.QFont("Microsoft YaHei UI", 8))
+            p.setPen(QtGui.QColor(170, 220, 245))
+            p.drawText(QtCore.QRectF(rect.right() - 112, rect.top() + 11, 86, 24),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, label)
+
+        # ---- 内层圆角块
+        ir = QtCore.QRectF(rect.left() + 18, rect.top() + 42 + label_h,
+                            w - 36, rect.height() - 60 - label_h)
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor(255, 255, 255, 30))
+        p.drawRoundedRect(ir, 16, 16)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 32), 1))
+        p.drawRoundedRect(ir, 16, 16)
+
+        data = self.weather or {}
+
+        # ---- 左边：城市 + 大字温度
+        city = data.get("city") or ""
+        cf = QtGui.QFont("Microsoft YaHei UI", 11)
+        p.setFont(cf)
+        p.setPen(QtGui.QColor(233, 236, 245, 225))
+        p.drawText(QtCore.QRectF(ir.left() + 20, ir.top() + 6, 340, 24),
+                   QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, city)
+        _draw_pin(p, ir.left() + 20 + QtGui.QFontMetrics(cf).horizontalAdvance(city) + 9,
+                  ir.top() + 18, 13)
+        hi, lo = data.get("hi"), data.get("lo")
+        if hi is not None:
+            big = "%d°" % round(float(hi))
+            bf = QtGui.QFont("Microsoft YaHei UI", 22)
+            p.setFont(bf)
+            p.setPen(QtGui.QColor(246, 247, 252))
+            x1 = ir.left() + 20
+            p.drawText(QtCore.QRectF(x1, ir.top() + 38, 220, 46),
+                       QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter, big)
+            if lo is not None:
+                p.setFont(QtGui.QFont("Microsoft YaHei UI", 17))
+                p.setPen(QtGui.QColor(198, 203, 215))
+                dx = x1 + QtGui.QFontMetrics(bf).horizontalAdvance(big) + 12
+                p.drawText(QtCore.QRectF(dx, ir.top() + 44, 160, 40),
+                           QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter,
+                           "%d°" % round(float(lo)))
+
+        # ---- 右边：图标 + 天气 + 今天
+        isz = 34
+        ix = ir.right() - 22 - isz
+        iy = ir.top() + 6
+        _draw_weather_icon(p, data.get("icon") or "cloud", ix, iy, isz)
+        p.setFont(QtGui.QFont("Microsoft YaHei UI", 10))
+        p.setPen(QtGui.QColor(236, 238, 246, 225))
+        text = data.get("text_en") if lang == "en" else data.get("text")
+        p.drawText(QtCore.QRectF(ix - 130, iy + isz + 2, 130 + isz, 22),
+                   QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, text or "")
+        p.setFont(QtGui.QFont("Microsoft YaHei UI", 9))
+        p.setPen(QtGui.QColor(186, 191, 205, 170))
+        p.drawText(QtCore.QRectF(ix - 130, iy + isz + 26, 130 + isz, 20),
+                   QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter,
+                   i18n.t(lang, "weather." + (data.get("day") or "today")))
 
 
 class CardWindow(QtWidgets.QWidget):
@@ -887,6 +1534,8 @@ class CardWindow(QtWidgets.QWidget):
         # 抢焦点之前的前台窗口：用完要还回去
         self._prev_fg = 0
         self._stole_focus = False
+        # close_card 的重入保护：我们自己发的 Esc 会走回 _cancel() -> close_card()
+        self._closing = False
         # 最近一次输入法事件的时刻（IME 提交时那一下回车是注入的，要放行）
         self._ime_until = 0.0
         # Win+H 阶段的兜底计时器：没人说话也没人确认，卡片不能一直挂着抢键盘
@@ -912,9 +1561,45 @@ class CardWindow(QtWidgets.QWidget):
         else:
             if self.editing:
                 self._cancel()
-            self.hide()
-            self.restore_foreground()
+            self.close_card()
         self.update()
+
+    def close_card(self):
+        """卡片的**唯一出口**：藏卡片 + 还焦点。
+
+        ⚠️ 以前「还焦点」只挂在 set_ui() 的空文案分支上，可关闭路径有 6~7 条
+        （提交 / Esc / 失焦 / Win+H 超时 / 天气面板 linger 结束 / 空文案 / 兜底），
+        只有 1 条会走到 —— 2026-11-08 日志：57 次抢焦点只还了 7 次，
+        用户侧表现就是「键盘失灵，字打到别处」。
+        现在所有路径都走这里，restore_foreground() 自己幂等（还过就清了标记）。
+
+        ⚠️ 2026-11-09 加了一步：**先把还活着的 Windows 语音输入会话关掉**。
+        那个会话会一直按着键盘 —— 卡片收了、焦点还给用户了，可键盘还被系统
+        语音输入按着，用户敲的字被吃掉，表现就是「别的应用没有反馈」
+        （2026-11-09 实测：只能靠人手动按 Esc 才恢复）。
+        """
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            self.cancel_timeout()
+            # 关掉还活着的语音会话（只在这个会话真的活着时才发 Esc）
+            try:
+                if winh_mod is not None and winh_mod.dismiss_voice_session():
+                    _trace("close_card: dismissed the live voice session")
+            except Exception:
+                pass
+            self.editor.hide()
+            self.editor.clear()
+            self.editing = False
+            if self.isVisible():
+                self.hide()
+        except Exception:
+            traceback.print_exc()
+        finally:
+            self._closing = False
+            # 抢了焦点就必须还 —— 放 finally 里，异常也不能吞掉
+            self.restore_foreground()
 
     def _place(self):
         """按覆盖层算出来的卡片几何摆窗口，并把输入框摆到正文位置。"""
@@ -972,6 +1657,7 @@ class CardWindow(QtWidgets.QWidget):
     def _cancel(self):
         if not self.editing:
             return
+        _trace("card cancelled")
         self.editing = False
         self.editor.hide()
         self.editor.clear()
@@ -984,6 +1670,8 @@ class CardWindow(QtWidgets.QWidget):
                 cb()
             except Exception:
                 pass
+        # 统一出口：卡片收掉 + 焦点还回去（不管有没有 Win+H 回调）
+        self.close_card()
 
     # ---------------------------------------------------------- 兜底计时器
     def arm_timeout(self, sec, cb):
@@ -1020,6 +1708,9 @@ class CardWindow(QtWidgets.QWidget):
         self.update()
         if text:
             self.sig_submit.emit(text)
+        # ⚠️ 输入已经结束了 —— 键盘该还给用户。
+        # 以前一直挂着焦点，卡片一藏，用户后面敲的字就全进了别处（看着像键盘失灵）。
+        self.restore_foreground()
 
     # ---------------------------------------------------------- 焦点 / 回车把关
     def remember_foreground(self):
@@ -1054,6 +1745,18 @@ class CardWindow(QtWidgets.QWidget):
         if not hwnd:
             return
         try:
+            # ⚠️ 2026-11-09：还键盘之前先等语音会话真的收工（最多 2.5 秒）。
+            #   会话还活着的时候把焦点还给用户的应用，用户的字还是会被系统吃掉。
+            waited = 0.0
+            try:
+                while waited < 2.5 and winh_mod is not None and winh_mod.voice_ui_active():
+                    time.sleep(0.1)
+                    waited += 0.1
+            except Exception:
+                pass
+            if waited > 0:
+                _trace("restore foreground: waited %.1fs for the voice session to end"
+                       % waited)
             ok = winh_mod.restore_foreground(hwnd) if winh_mod is not None else False
             _trace("restore foreground: hwnd=%s ok=%s" % (hwnd, ok))
         except Exception:
@@ -1109,8 +1812,45 @@ class CardWindow(QtWidgets.QWidget):
                     self._cancel()
                     return True
             elif ev.type() == QtCore.QEvent.FocusOut:
+                # ⚠️ 2026-11-09 修：Windows 语音输入 UI 一打开就把输入框的焦点抢走。
+                #   以前这里无条件 _cancel() -> 卡片关掉 -> 焦点还给用户的应用，
+                #   可**语音会话还活着**（麦克风坏，它一直等音频）——
+                #   用户的应用拿回了焦点，键盘却被系统语音输入按着，
+                #   表现就是「别的应用没有反馈」，只能靠人按 Esc 才恢复。
+                #   现在：语音会话还活着时，失焦是**预期内的** —— 不取消卡片，
+                #   反而把焦点抢回输入框（识别到的字才有地方落）。
+                try:
+                    live = bool(winh_mod is not None and winh_mod.voice_ui_active())
+                except Exception:
+                    live = False
+                if live:
+                    _trace("card focus out (voice session alive) -> keep card, refocus")
+                    QtCore.QTimer.singleShot(120, self._refocus_editor)
+                    return True
+                _trace("card focus out -> cancel")
                 self._cancel()
         return False
+
+    def _refocus_editor(self):
+        """把焦点抢回输入框。
+
+        Windows 语音输入 UI 会把焦点从我们的输入框上抢走。不抢回来的话，
+        识别到的字就没有地方落 —— 以前是靠「卡片提前取消」来躲开，
+        结果语音会话留在后台一直按着键盘（别的应用就没反馈了）。
+        """
+        try:
+            if not self.editing or not self.isVisible():
+                return
+            try:
+                live = bool(winh_mod is not None and winh_mod.voice_ui_active())
+            except Exception:
+                live = False
+            if not live:
+                return
+            self.editor.setFocus(QtCore.Qt.OtherFocusReason)
+            QtCore.QTimer.singleShot(250, self._refocus_editor)
+        except Exception:
+            pass
 
 
 def _reply_chain(text, cfg, llm, speaker, emit):
@@ -1304,7 +2044,13 @@ def _begin_winh(overlay, card):
         # 给 Windows 一点时间把焦点落实 —— 发早了焦点还在别的程序手里
         stt_cfg = (overlay.cfg.get("stt") or {})
         # 兜底：没人说话也没人确认 -> 卡片自己收掉，把键盘还回去
-        winh_timeout = float(stt_cfg.get("winh_timeout_sec", 45) or 45)
+        # ⚠️ 2026-11-09 修：以前这里是写死的 45 秒，而且**根本不看设置面板上的
+        #   「听写超时」**（stt.timeout_sec）—— 那个旋钮只在离线听写那条路上生效。
+        #   结果：Win+H 模式下没人说话时，语音会话能一直活着（麦克风坏，它一直
+        #   等音频），键盘一直被系统按着，别的应用全部没反馈。
+        #   现在：**统一听设置面板上那个「听写超时」**（默认 10 秒），
+        #   到点强制收卡片 + 强制关掉语音会话，键盘立刻还给用户。
+        winh_timeout = float(stt_cfg.get("timeout_sec", 10) or 10)
 
         def _give_up():
             try:
@@ -1397,11 +2143,74 @@ def _redirect_stdout_if_frozen():
         return None
 
 
+def _notify(title, text):
+    """弹一个系统级提示框。
+
+    托盘常驻、没有控制台 —— 想让用户看见的事，不能只 print 到日志里。
+    """
+    try:
+        ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)
+    except Exception:
+        pass
+
+
+def _resolve_hotkey(preferred):
+    """热键被别的程序占了怎么办 —— 自动顺延，并把实际生效的键告诉用户。
+
+    以前 RegisterHotKey 失败只在 stdout 打一行，用户完全无感知，
+    表现就是「按了没反应」。顺延顺序：原值 -> ctrl+alt+shift+space
+    -> ctrl+shift+space -> F9。
+    """
+    cands = [preferred] + [c for c in ("ctrl+alt+shift+space", "ctrl+shift+space", "F9")
+                           if c != preferred]
+    for hk in cands:
+        if not hk:
+            continue
+        try:
+            mods, vk = keyhook_mod.parse_hotkey(hk)
+        except Exception:
+            continue
+        if not vk:
+            continue
+        ok = False
+        try:
+            ok = bool(keyhook_mod.user32.RegisterHotKey(
+                None, 0xBEEF, mods | keyhook_mod.MOD_NOREPEAT, vk))
+        except Exception:
+            ok = False
+        try:
+            ctypes.windll.user32.UnregisterHotKey(0, 0xBEEF)
+        except Exception:
+            pass
+        if ok:
+            if hk != preferred:
+                return hk, ("原热键 %s 被别的程序占用了，已自动改用 %s\n"
+                            "（小米语音键不受影响，照常可用）" % (preferred, hk))
+            return hk, None
+    return preferred, None
+
+
 def main():
     # 打包后同一个 exe 也能开设置面板（--settings）
     if "--settings" in sys.argv:
         import settings as settings_mod
         sys.exit(settings_mod.main())
+    # ---- 单实例互斥（要早于 QApplication）----
+    # 以前没有：双开就是两个实例同时装低级键盘钩子、同时抢热键、同时抢焦点，
+    # 一个 Win+H 的输入被两边消费 —— 2026-11-08 日志里有 8 组「6~7 秒内连开两次」。
+    _mutex = None
+    try:
+        _k32 = ctypes.windll.kernel32
+        _mutex = _k32.CreateMutexW(None, False, "Global\\SiriOS.Singleton")
+        if not _mutex:
+            _mutex = _k32.CreateMutexW(None, False, "Local\\SiriOS.Singleton")
+        _already = (_k32.GetLastError() == 183)   # ERROR_ALREADY_EXISTS
+    except Exception:
+        _mutex = None
+        _already = False
+    if _already:
+        _notify("Siri-OS", "已经在运行了（看右下角托盘图标）。")
+        return 0
     _redirect_stdout_if_frozen()
     # ⚠️ 启动第一件事：把「这次读的是哪份配置」写进日志。
     #    「重启后配置被重置」这类问题的第一手证据就是这个路径：
@@ -1446,6 +2255,16 @@ def main():
     except Exception:
         pass
 
+    # 天气工具查完 -> 把结构化数据推上屏幕（Live Activity 式面板）
+    # ⚠️ 必须走信号：工具跑在 agent 的工作线程里，直接调 GUI 方法
+    #    （set_weather -> card.set_ui -> update）会被 Qt 丢掉重绘，
+    #    卡片不重绘 = 面板永远不上屏（2026-11-08 实测：面板死活不出来）。
+    try:
+        overlay.sig_weather.connect(overlay.set_weather)
+        tools_mod.set_hook("weather_panel", lambda p: overlay.sig_weather.emit(p))
+    except Exception as e:
+        _trace("weather hook failed: %r" % (e,))
+
     demo = "--demo" in sys.argv
     voice_thread = None
     reply_thread = None
@@ -1466,6 +2285,10 @@ def main():
         """卡片里打字回车 —— 走和语音完全一样的回复链路。"""
         nonlocal reply_thread
         _trace("submit: %s" % text[:80].replace("\n", " "))
+        try:
+            overlay.last_question = text      # 天气面板的标题就是这一句
+        except Exception:
+            pass
         try:
             card.cancel_timeout()      # 已经确认了，别再兜底关卡片
         except Exception:
@@ -1513,10 +2336,20 @@ def main():
     if demo:
         run_demo(overlay)
     else:
+        hotkey, hotkey_note = _resolve_hotkey(cfg.get("hotkey", "ctrl+alt+space"))
+        if hotkey_note:
+            # 实际生效的热键要写回配置 —— 否则设置页显示的还是那个被占用的键
+            try:
+                cfg["hotkey"] = hotkey
+                cfgstore.save(cfg)
+            except Exception:
+                pass
+            _trace("hotkey fallback: %s" % hotkey_note.replace("\n", " "))
+            _notify("Siri-OS 热键", hotkey_note)
         hook = KeyHook(
             on_hotkey=trigger,
             on_match=lambda vk, sc: trigger(),
-            hotkey=cfg.get("hotkey", "ctrl+alt+space"),
+            hotkey=hotkey,
             scan_code=cfg.get("xiaomi_scan_code"),
             vk=cfg.get("xiaomi_vk"),
             log_path=KEY_LOG,
@@ -1528,6 +2361,10 @@ def main():
             print("[siri_orb] hook error: %s" % hook.error)
         if hook.hotkey_error:
             print("[siri_orb] hotkey error: %s" % hook.hotkey_error)
+            _trace("hotkey error: %s" % hook.hotkey_error)
+            # 静默失败 = 用户「按了没反应」还不知道为什么
+            _notify("Siri-OS 热键", "热键注册失败：%s\n"
+                    "可以去设置页换一个别的组合。" % hook.hotkey_error)
         print("[siri_orb] key log: %s" % KEY_LOG)
 
     def open_settings():
