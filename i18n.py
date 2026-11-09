@@ -117,8 +117,13 @@ STRINGS = {
     "reply.mic_crash": ("麦克风异常：听写进程崩溃（rc=%s）",
                         "Microphone error: the recognition process crashed (rc=%s)"),
     "reply.error": ("出错了：%s", "Something went wrong: %s"),
-    "reply.winh_hint": ("已开 Win+H，说吧 —— 说完按 Enter 发送",
-                        "Win+H is open - speak, then press Enter to send"),
+    # ⚠️ Windows 的语音输入面板是**被我们藏起来的**（用户要求不刷屏），
+    #    所以「麦克风好了没」只能靠卡片上这行字告诉用户 ——
+    #    什么时候该开口、什么时候开口会白费，全看它。
+    "reply.winh_starting": ("正在打开语音输入…",
+                            "Opening voice input..."),
+    "reply.winh_hint": ("麦克风已就绪 —— 现在说话，说完按 Enter 发送",
+                        "Microphone is live - speak now, then press Enter to send"),
     "reply.model_down": ("模型没连上。运行 python set_key.py 填一下 key 就能用。%s",
                          "The model isn't reachable. Run: python set_key.py to store a key. %s"),
 

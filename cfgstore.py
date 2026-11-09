@@ -220,7 +220,7 @@ DEFAULTS = {
     #   auto = 上次成功的语言优先，这次没听清就换另一种再试一次
     # stt.mode: winh = 走 Windows 自带语音输入（Win+H）；offline = 本机 System.Speech
     "stt": {"timeout_sec": 10, "language": "auto", "mode": "winh",
-            "hide_panel": True, "mute_start_sound": True, "mute_seconds": 1.8,
+            "hide_panel": True, "mute_start_sound": True, "mute_seconds": 2.6,
             "hide_max_seconds": 120.0},
     "tts": {"voice_hint": "Huihui", "rate": 0},
     # ⚠️ 语言中性：只说「你是谁、怎么说话」，不说用哪种语言 ——
@@ -373,8 +373,8 @@ SPEC = [
      "en_hint": "Win+H shows Windows' own voice typing bar/toast. This hides it automatically; dictation itself is unaffected."},
     {"key": "stt.mute_start_sound", "tab": "语音", "label": "静音开始录音提示音", "en_label": "Mute start-of-recording sound",
      "type": "bool",
-     "hint": "刚开始录音那声「叮」，按一次键的工夫内把语音输入自己那个音频会话的音量压掉再恢复（只压这一小会儿）。",
-     "en_hint": "Silences the beep when recording starts by briefly muting the voice typing audio session, then restoring it."},
+     "hint": "刚开始录音那声「叮」，面板打开前后这几秒里把语音输入自己的音频会话压掉再恢复（只压这一小会儿）。静音会连带压住麦克风采集，所以卡片上的「麦克风已就绪」是在静音解除之后才出现的 —— 看到那行字再开口。",
+     "en_hint": "Silences the beep when recording starts by briefly muting the voice typing audio session, then restoring it. Muting also mutes the microphone, so 'the microphone is live' appears on the card only after the mute is lifted - speak once you see it."},
     {"key": "tts.voice_hint", "tab": "语音", "label": "播报音色", "en_label": "Voice",
      "type": "choice", "choices": ["Huihui", "Kangkang", "Yunyang", "Xiaoxiao", "Zira", "David"],
      "editable": True,

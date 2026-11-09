@@ -1543,6 +1543,25 @@ class CardWindow(QtWidgets.QWidget):
         self._winh_timer.setSingleShot(True)
         self._winh_timer.timeout.connect(self._winh_timeout)
         self._winh_cb = None
+        # 「麦克风好了没」的探针：面板从按键到就绪要 1~2 秒，
+        # 而面板又被我们藏起来了 -> 卡片上的提示字是用户唯一的信号。
+        self._live_timer = QtCore.QTimer(self)
+        self._live_timer.setInterval(200)
+        self._live_timer.timeout.connect(self._poll_voice_live)
+        self._live_state = None
+        # 「麦克风已就绪」是**闩**：这一轮见过会话活过就一直算就绪。
+        # 会话的 Active 状态会闪（面板被我们藏起来、藏/显切换时音频会话
+        # 瞬时 inactive —— 2026-11-09 19:52 实测 33 秒活、34 秒又死），
+        # 跟着它翻 = 提示字在「正在打开…」和「麦克风已就绪」之间抖，
+        # 用户根本判断不了该什么时候开口。
+        self._live_seen = False
+        # 「麦克风已就绪」是**闩**：会话活过 + 静音解除，才算就绪。
+        self._ready = False
+        # 还焦点用的**非阻塞**轮询：语音会话还活着时不能把键盘还给用户，
+        # 但**绝不能阻塞 GUI 线程去等**（2026-11-09 实测：阻塞 2.5 秒 = 整个 app 卡死）。
+        self._restore_hwnd = 0
+        self._restore_deadline = 0.0
+        self._restore_timer = None
         self.editor.textChanged.connect(self._on_text_changed)
 
     # ---------------------------------------------------------- 状态与位置
@@ -1640,6 +1659,10 @@ class CardWindow(QtWidgets.QWidget):
         if not self.caption and placeholder is None:
             return
         self.editing = True
+        # 新的一轮：把「麦克风已就绪」的闩复位
+        self._live_seen = False
+        self._ready = False
+        self._live_state = None
         if placeholder is None:
             self.editor.setPlainText(self.caption)
             self.editor.setPlaceholderText("")
@@ -1654,11 +1677,87 @@ class CardWindow(QtWidgets.QWidget):
             self.editor.selectAll()  # 第一次点=整段选中，直接打字就是替换
         self.update()
 
+    def _poll_voice_live(self):
+        """语音会话起来了没？—— 卡片上的提示字跟着变。
+
+        为什么必须有：Windows 的语音输入面板是**被我们藏起来的**
+        （用户要求不刷屏），所以用户看不到「麦克风好了没」，
+        只能靠卡片上这行字。面板从按键到就绪要 1~2 秒，
+        这段时间里开口 = 第一个字被静音窗口吃掉。
+
+        ⚠️ 「就绪」必须**闩住**：见一次活就一直是就绪，不能跟着会话状态翻。
+        2026-11-09 19:52 实测：面板被我们藏起来/藏显切换时，音频会话的
+        Active 会瞬时闪断（19:52:33 活 -> 19:52:34 又死），照着它翻 =
+        提示字抖动，用户永远等不到一个稳定的「可以开口了」。
+        """
+        if not self.editing:
+            return
+        try:
+            live = bool(winh_mod is not None and winh_mod.voice_ui_active())
+        except Exception:
+            live = False
+        if live:
+            self._live_seen = True      # 闩住：这一轮见过活 = 面板开过
+        # ⚠️ 光「会话活着」还不够：静音窗口（用来盖住开始录音那声「叮」）
+        #   **连麦克风采集一起压**，静音没解除之前开口 = 一个字都收不到。
+        #   所以「麦克风已就绪」必须等静音真的解除。
+        if self._live_seen and not self._ready:
+            try:
+                muted = bool(winh_mod is not None
+                             and winh_mod.voice_capture_muted())
+            except Exception:
+                muted = False
+            if not muted:
+                self._ready = True
+        if self._ready == self._live_state:
+            return
+        self._live_state = self._ready
+        try:
+            ui = i18n.ui_lang(self.host.cfg)
+            key = "reply.winh_hint" if self._ready else "reply.winh_starting"
+            # ⚠️ 不要再用「框里有字就不改提示字」当守卫 —— 2026-11-09 20:00 实测：
+            #   语音面板会先往框里打进一个临时字符（那不是用户说的话，会被它自己撤掉），
+            #   守卫一挡，提示字就永远停在旧的那句。
+            #   占位文字**有字时不显示**，所以直接改是安全的
+            #   （实测 setPlaceholderText 不清文档、不动光标）。
+            self.editor.setPlaceholderText(i18n.t(ui, key))
+            if self._live_seen:
+                how = "alive, mic ready" if self._ready else "alive, capture still muted"
+            else:
+                how = "not alive yet"
+            _trace("voice session %s -> card hint = %s" % (how, key))
+        except Exception:
+            pass
+
+    def _cancel_if_still_dead(self):
+        """失焦 250ms 后再判一次：会话只是闪了一下就别把这一轮毙掉。"""
+        try:
+            if not self.editing:
+                return
+            try:
+                live = bool(winh_mod is not None and winh_mod.voice_ui_active())
+            except Exception:
+                live = False
+            # ⚠️ 瞬时闪断也算「活着」：这一轮见过会话活过 = 面板开着 =
+            #   用户马上要开口，这时候把卡片毙掉 = 这一轮白按。
+            if live or self._live_seen:
+                _trace("card focus out: voice session came back -> keep card")
+                QtCore.QTimer.singleShot(120, self._refocus_editor)
+                return
+            _trace("card focus out -> cancel (voice session still not alive)")
+            self._cancel()
+        except Exception:
+            pass
+
     def _cancel(self):
         if not self.editing:
             return
         _trace("card cancelled")
         self.editing = False
+        try:
+            self._live_timer.stop()
+        except Exception:
+            pass
         self.editor.hide()
         self.editor.clear()
         self.update()
@@ -1679,6 +1778,11 @@ class CardWindow(QtWidgets.QWidget):
         self._winh_cb = cb
         try:
             self._winh_timer.start(int(max(1.0, float(sec)) * 1000))
+        except Exception:
+            pass
+        # 只有 Win+H 阶段才有「麦克风就绪」这回事
+        try:
+            self._live_timer.start()
         except Exception:
             pass
 
@@ -1703,11 +1807,25 @@ class CardWindow(QtWidgets.QWidget):
     def _submit(self):
         text = self.editor.toPlainText().strip()
         self.editing = False
+        try:
+            self._live_timer.stop()
+        except Exception:
+            pass
         self.editor.hide()
         self.editor.clear()
         self.update()
         if text:
             self.sig_submit.emit(text)
+        # ⚠️ 2026-11-09：提交这条路**以前根本没关过语音会话** ——
+        #   只有 close_card 会发 Esc，而 submit 不经过 close_card。
+        #   结果：用户按回车之后，系统语音输入还按着键盘（用户的字被吃掉），
+        #   我们只能干等它自己超时 —— 而那个等待是**阻塞在 GUI 线程上**的，
+        #   实测「每次按回车都卡一会」。
+        try:
+            if winh_mod is not None and winh_mod.dismiss_voice_session():
+                _trace("submit: dismissed the live voice session")
+        except Exception:
+            pass
         # ⚠️ 输入已经结束了 —— 键盘该还给用户。
         # 以前一直挂着焦点，卡片一藏，用户后面敲的字就全进了别处（看着像键盘失灵）。
         self.restore_foreground()
@@ -1744,21 +1862,50 @@ class CardWindow(QtWidgets.QWidget):
         self._stole_focus = False
         if not hwnd:
             return
+        # ⚠️⚠️ 2026-11-09：这里原来是个 `while ...: time.sleep(0.1)` 的**阻塞等待**
+        #   （最多 2.5 秒），而且跑在 **Qt GUI 线程**上 —— 整个 app 在那 2.5 秒里是死的
+        #   （实测：每次按回车都「卡一会」）。
+        #   现在改成**定时器轮询**：界面照常满帧，语音会话一死就把焦点还回去。
+        self._restore_hwnd = hwnd
+        self._restore_deadline = time.time() + 2.5
         try:
-            # ⚠️ 2026-11-09：还键盘之前先等语音会话真的收工（最多 2.5 秒）。
-            #   会话还活着的时候把焦点还给用户的应用，用户的字还是会被系统吃掉。
-            waited = 0.0
-            try:
-                while waited < 2.5 and winh_mod is not None and winh_mod.voice_ui_active():
-                    time.sleep(0.1)
-                    waited += 0.1
-            except Exception:
-                pass
-            if waited > 0:
-                _trace("restore foreground: waited %.1fs for the voice session to end"
-                       % waited)
+            if self._restore_timer is None:
+                self._restore_timer = QtCore.QTimer(self)
+                self._restore_timer.setInterval(100)
+                self._restore_timer.timeout.connect(self._poll_restore)
+        except Exception:
+            pass
+        self._poll_restore()
+
+    def _poll_restore(self):
+        """非阻塞地等语音会话收工，然后还焦点。"""
+        hwnd = self._restore_hwnd
+        if not hwnd:
+            self._stop_restore()
+            return
+        alive = False
+        try:
+            alive = bool(winh_mod is not None and winh_mod.voice_ui_active())
+        except Exception:
+            alive = False
+        if alive and time.time() < self._restore_deadline:
+            return                       # 还在等 —— 但界面不卡
+        waited = max(0.0, 2.5 - (self._restore_deadline - time.time()))
+        self._stop_restore()
+        try:
             ok = winh_mod.restore_foreground(hwnd) if winh_mod is not None else False
-            _trace("restore foreground: hwnd=%s ok=%s" % (hwnd, ok))
+            _trace("restore foreground: hwnd=%s ok=%s%s"
+                   % (hwnd, ok,
+                      " (waited %.1fs for the voice session)" % waited
+                      if waited > 0.05 else ""))
+        except Exception:
+            pass
+
+    def _stop_restore(self):
+        self._restore_hwnd = 0
+        try:
+            if self._restore_timer is not None:
+                self._restore_timer.stop()
         except Exception:
             pass
 
@@ -1827,8 +1974,12 @@ class CardWindow(QtWidgets.QWidget):
                     _trace("card focus out (voice session alive) -> keep card, refocus")
                     QtCore.QTimer.singleShot(120, self._refocus_editor)
                     return True
-                _trace("card focus out -> cancel")
-                self._cancel()
+                # ⚠️ 会话状态**会闪**：Windows 的语音面板自己在藏/显之间切时，
+                #   音频会话会瞬时 inactive。立刻判死 = 整轮白按 ——
+                #   卡片一关，我们会主动 Esc 掉会话，用户的字再也落不进来。
+                #   -> 延迟 250ms 复查一次再决定。
+                _trace("card focus out -> recheck in 250ms")
+                QtCore.QTimer.singleShot(250, self._cancel_if_still_dead)
         return False
 
     def _refocus_editor(self):
@@ -2029,7 +2180,8 @@ def _begin_winh(overlay, card):
     做成**模块级函数**是为了能单测 —— main() 里的闭包没法在测试里碰到。
     """
     ui = i18n.ui_lang(overlay.cfg)
-    hint = i18n.t(ui, "reply.winh_hint")
+    # 一开始是「正在打开」；面板真的就绪后，卡片上的字会自己变成「麦克风已就绪」
+    hint = i18n.t(ui, "reply.winh_starting")
     # 抢焦点之前先记住原来是谁在前台 —— 用完要还回去
     card.remember_foreground()
     overlay.set_ui("listening", hint)

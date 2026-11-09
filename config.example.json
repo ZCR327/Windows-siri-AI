@@ -99,7 +99,7 @@
     "mode": "winh",
     "hide_panel": true,
     "mute_start_sound": true,
-    "mute_seconds": 1.8,
+    "mute_seconds": 2.6,
     "hide_max_seconds": 120.0
   },
   "tts": {

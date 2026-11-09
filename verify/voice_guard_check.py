@@ -206,6 +206,8 @@ def part_d():
 
 # ---------------------------------------------------------------- E / F
 class FakeHost(object):
+    cfg = {}
+
     def caption_geom(self):
         return (0, 0, 400, 120, "label", 20, QtGui.QFont())
 
@@ -260,14 +262,143 @@ def part_f():
     try:
         siri_orb.CardWindow._cancel = lambda self: cancelled.append(1)
         siri_orb.winh_mod.voice_ui_active = lambda: True
+        card.editing = True      # the card is open (the mock never calls start_edit)
         card.eventFilter(card.editor, FakeEv(QtCore.QEvent.FocusOut))
         check("card survives the focus loss", len(cancelled), 0)
         siri_orb.winh_mod.voice_ui_active = lambda: False
         card.eventFilter(card.editor, FakeEv(QtCore.QEvent.FocusOut))
+        # 2026-11-09 晚：失焦不再**立刻**判死。
+        # 会话状态会闪（Windows 的语音面板自己藏/显时，音频会话瞬时 inactive），
+        # 一次闪断就把整轮毙掉 = 用户的字再也落不进来。
+        # -> 延迟 250ms 复查一次再决定。
+        check("a dead session does not cancel instantly", len(cancelled), 0)
+        card._cancel_if_still_dead()
         check("without a voice session it still cancels", len(cancelled), 1)
+        # 会话在宽限期里闪回来 -> 卡片必须保住
+        cancelled[:] = []
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        card.eventFilter(card.editor, FakeEv(QtCore.QEvent.FocusOut))
+        card._cancel_if_still_dead()
+        check("a session that flaps back keeps the card", len(cancelled), 0)
     finally:
         siri_orb.CardWindow._cancel = oc
         siri_orb.winh_mod.voice_ui_active = oa
+    print("")
+
+
+# ---------------------------------------------------------------- G
+def part_g():
+    print("=== G. the mic-ready hint LATCHES (the session state flaps) ===")
+    import i18n
+    card = siri_orb.CardWindow({}, FakeHost())
+    card.editing = True
+    oa = siri_orb.winh_mod.voice_ui_active
+    om = siri_orb.winh_mod.voice_capture_muted
+    try:
+        ui = i18n.ui_lang({})
+        hint = i18n.t(ui, "reply.winh_hint")
+        start = i18n.t(ui, "reply.winh_starting")
+
+        siri_orb.winh_mod.voice_ui_active = lambda: False
+        card._poll_voice_live()
+        check("before the session: the card says opening",
+              card.editor.placeholderText(), start)
+
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        card._poll_voice_live()
+        check("session alive: the card says the mic is ready",
+              card.editor.placeholderText(), hint)
+
+        # The session flaps: the panel is hidden/shown, so the audio session
+        # goes inactive for a moment.  The hint must NOT flap back.
+        siri_orb.winh_mod.voice_ui_active = lambda: False
+        card._poll_voice_live()
+        check("a flapping session does not flap the hint back",
+              card.editor.placeholderText(), hint)
+
+        # and a focus-out during that flap must not kill the card
+        cancelled = []
+        oc = siri_orb.CardWindow._cancel
+        siri_orb.CardWindow._cancel = lambda self: cancelled.append(1)
+        try:
+            card._cancel_if_still_dead()
+            check("a flap during focus-out keeps the card", len(cancelled), 0)
+        finally:
+            siri_orb.CardWindow._cancel = oc
+
+        # The mute window is still on: the mic is NOT live yet (muting also
+        # mutes the capture), so the card must NOT say 'the mic is ready'.
+        card2 = siri_orb.CardWindow({}, FakeHost())
+        card2.editing = True
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        siri_orb.winh_mod.voice_capture_muted = lambda: True
+        card2._poll_voice_live()
+        check("a muted capture is not 'mic ready' yet",
+              card2.editor.placeholderText(), start)
+        siri_orb.winh_mod.voice_capture_muted = lambda: False
+        card2._poll_voice_live()
+        check("once the mute lifts the card says the mic is ready",
+              card2.editor.placeholderText(), hint)
+
+        # The voice panel drops a temp character into the box before the mic is
+        # live (it removes it again).  The hint must still update.
+        card2.editor.setPlainText("e")
+        card3 = siri_orb.CardWindow({}, FakeHost())
+        card3.editing = True
+        card3.editor.setPlainText("e")
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        siri_orb.winh_mod.voice_capture_muted = lambda: False
+        card3._poll_voice_live()
+        check("a temp char in the box does not block the hint",
+              card3.editor.placeholderText(), hint)
+        check("the temp char is not wiped", card3.editor.toPlainText(), "e")
+
+        # a NEW round resets the latch
+        card.start_edit(placeholder=start)
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        card._poll_voice_live()
+        check("a new round can show mic-ready again",
+              card.editor.placeholderText(), hint)
+    finally:
+        siri_orb.winh_mod.voice_ui_active = oa
+        siri_orb.winh_mod.voice_capture_muted = om
+    print("")
+
+
+# ---------------------------------------------------------------- H
+def part_h():
+    print("=== H. submitting does not block the GUI thread ===")
+    import time
+    card = siri_orb.CardWindow({}, FakeHost())
+    dismissed = []
+    restored = []
+    od = siri_orb.winh_mod.dismiss_voice_session
+    oa = siri_orb.winh_mod.voice_ui_active
+    orf = siri_orb.winh_mod.restore_foreground
+    try:
+        siri_orb.winh_mod.dismiss_voice_session = lambda: (dismissed.append(1), True)[1]
+        # the session never dies on its own -> the OLD code blocked 2.5 s here
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        siri_orb.winh_mod.restore_foreground = lambda h: (restored.append(h), True)[1]
+        card.editing = True
+        card._stole_focus = True
+        card._prev_fg = 12345
+        card.editor.setPlainText("hello")
+        t0 = time.time()
+        card._submit()
+        dt = time.time() - t0
+        check("submit returns fast (no blocking wait)", dt < 0.3, True)
+        check("the live voice session was dismissed", len(dismissed), 1)
+        check("the focus is NOT taken back while the session lives",
+              len(restored), 0)
+        # the session dies -> the focus comes back, still without blocking
+        siri_orb.winh_mod.voice_ui_active = lambda: False
+        card._poll_restore()
+        check("the focus goes back once the session ends", restored, [12345])
+    finally:
+        siri_orb.winh_mod.dismiss_voice_session = od
+        siri_orb.winh_mod.voice_ui_active = oa
+        siri_orb.winh_mod.restore_foreground = orf
     print("")
 
 
@@ -280,6 +411,8 @@ def main():
     part_d()
     part_e()
     part_f()
+    part_g()
+    part_h()
     print("=== summary ===")
     if FAILS:
         for f in FAILS:

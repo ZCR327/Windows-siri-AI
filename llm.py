@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
     prov = None
 
 # 本机 MiniMax 网关配置（可选）：本机已经登录过时可以免填 key。
-# 依次尝试：环境变量 MINIMAX_GATEWAY_CFG -> ~/.minimax/config.yaml -> Windows 默认安装路径
+# 依次尝试：环境变量 MINIMAX_GATEWAY_CFG -> ~/.minimax/config.yaml
 LOCAL_CFG_CANDIDATES = (
     os.environ.get("MINIMAX_GATEWAY_CFG", "").strip(),
 )

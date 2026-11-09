@@ -342,6 +342,11 @@ def suppress_voice_ui(max_seconds=None, interval=0.05, on_hide=None):
                 if panel is None:
                     panel, panel_host = _find_voice_panel_window()
                     if panel:
+                        # 认出来的这扇窗**用过像素判据**（蓝按钮）—— 缓存下来。
+                        # dismiss_voice_session() 要给它直接发 Esc：
+                        # 认错了窗 = Esc 打到中文输入法自己的窗上。
+                        global _PANEL_HWND
+                        _PANEL_HWND = int(panel)
                         hidden.append((panel, panel_host))
                         d = _describe_window(panel)
                         was_vis = bool(d[3]) if d else False
@@ -764,22 +769,40 @@ def dismiss_voice_session():
     表现就是「别的应用没有反馈」（2026-11-09 实测：发完 Win+H 0.5 秒时
     语音音频会话还是 Active）。
 
-    ⚠️ **只在会话真的活着的时候发**：Esc 是发给当前焦点窗口的，
-    会话已经结束时再补一个 Esc，会变成在用户的应用里乱按一下。
+    ⚠️ **只在会话真的活着的时候发**：会话已经结束时再补一个 Esc，
+    会变成在用户的应用里乱按一下。
+
+    ⚠️⚠️ 2026-11-09 实测：**全局 Esc 根本到不了 Windows 的语音面板** ——
+    Esc 是发给**当前焦点窗口**的，而我们为了收字**把焦点抢到了自己的卡片上**，
+    这一发 Esc 被自己的输入框吃了（`_cancel()` 里 editing 已经是 False，直接忽略）。
+    结果：会话还在活着，键盘还被系统按着，只能干等它自己超时
+    （实测 2.5 秒 —— 而那 2.5 秒是**阻塞在 GUI 线程上**的，实测「按回车就卡一会」）。
+    -> 现在**直接给面板窗口发 Esc**（PostMessage，不需要焦点），
+       全局 Esc 只当兜底（面板不认消息时才用）。
     """
     try:
         if not _voice_session_active():
             return False
     except Exception:
         return False
+    u = ctypes.windll.user32
+    sent = False
     try:
-        u = ctypes.windll.user32
+        h = _panel_hwnd_cached()
+        if h:
+            u.PostMessageW(ctypes.c_void_p(int(h)), 0x0100, 0x1B, 0)   # WM_KEYDOWN VK_ESCAPE
+            u.PostMessageW(ctypes.c_void_p(int(h)), 0x0101, 0x1B, 0)   # WM_KEYUP
+            sent = True
+    except Exception:
+        pass
+    try:
         u.keybd_event(VK_ESCAPE, 0, 0, 0)
         time.sleep(0.03)
         u.keybd_event(VK_ESCAPE, 0, KEYUP, 0)
-        return True
+        sent = True
     except Exception:
-        return False
+        pass
+    return sent
 
 
 def voice_ui_active():
@@ -810,6 +833,29 @@ def _voice_session_active():
             for s in list_audio_sessions(role):
                 try:
                     if s.owner == _VOICE_PANEL_PROC and s.state == 1:
+                        return True
+                finally:
+                    s.free()
+    except Exception:
+        pass
+    return False
+
+
+def voice_capture_muted():
+    """语音输入宿主的音频会话现在是不是**还压着**（静音窗口没结束）。
+
+    为什么必须有这个（2026-11-09 实测踩出来的）：
+      - 那声「叮」是**面板真正打开**（= 开始录音）时播的，按键后 1~2 秒；
+      - 静音窗口是用来盖住它的，但窗口一开，面板还在**采集**（静音连采集一起压），
+        也就是说**静音没解除之前麦克风是不收音的**。
+    所以「麦克风已就绪」这句话不能只看会话活没活 —— 还得看静音解没解。
+    静音没解就说「就绪」= 用户一开口就没字。
+    """
+    try:
+        for role in (_ROLE_MULTIMEDIA, _ROLE_CONSOLE):
+            for s in list_audio_sessions(role):
+                try:
+                    if s.owner == _VOICE_PANEL_PROC and s.muted:
                         return True
                 finally:
                     s.free()
