@@ -4,7 +4,9 @@
 这些工具**都是本机真实动作**：读文件、改文本、抓网页、改图片、点鼠标、打字、切窗口。
 
 三条硬规矩（别为了好用到破）：
-1. **文件类工具锁在工作目录内** —— 路径越界直接拒绝，不给模型越权的机会。
+1. **文件类工具锁在允许的目录内** —— 默认是工作目录；
+   设置里可以额外放开若干目录（agent.file_roots），
+   越出这些目录的路径直接拒绝，不给模型越权的机会。
 2. **鼠标键盘 / Shell 两类默认关** —— 面板里显式打开才生效（风险最高的两类）。
 3. **每个工具都返回字符串** —— 直接塞回对话给模型看；失败也要说清楚为什么，
    模型才能自己换个办法，而不是卡在那儿。
@@ -94,9 +96,57 @@ def ensure_work_dir(cfg):
     return base
 
 
+def extra_roots(cfg):
+    """额外放开的目录（agent.file_roots）—— 空 = 只有工作目录。
+
+    格式：字符串用「;」分隔多个目录，也可以直接写成列表。
+    """
+    raw = ((cfg or {}).get("agent") or {}).get("file_roots")
+    if isinstance(raw, str):
+        items = raw.replace(chr(13), "").replace(chr(10), ";").split(";")
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        items = []
+    out = []
+    for r in items:
+        r = str(r).strip().strip('"').strip("'").strip()
+        if not r:
+            continue
+        try:
+            # 盘符根目录要归一：只写 "D:" 时 abspath 会解析成
+            # 当前目录（正好是会话目录），而不是整个盘。
+            if len(r) == 2 and r[1] == ":":
+                r = r + os.sep
+            out.append(os.path.abspath(os.path.expanduser(r)))
+        except Exception:
+            continue
+    return out
+
+
+def allowed_roots(cfg):
+    """文件类工具允许访问的根目录：工作目录 + 额外放开的。"""
+    roots = [work_dir(cfg)]
+    for r in extra_roots(cfg):
+        if r not in roots:
+            roots.append(r)
+    return roots
+
+
+def _within(root, full):
+    """full 在 root 之内吗（盘符根目录要按前缀算）。"""
+    r = os.path.abspath(root)
+    if len(r) == 2 and r[1] == ":":
+        r = r + os.sep
+    if r.endswith(os.sep):
+        return full.startswith(r)
+    return full == r or full.startswith(r + os.sep)
+
+
 def _safe_path(cfg, path, must_exist=False):
-    """把模型给的路径解析成**工作目录内**的绝对路径；越界就拒绝。"""
-    base = work_dir(cfg)
+    """把模型给的路径解析成**允许的目录内**的绝对路径；越界就拒绝。"""
+    roots = allowed_roots(cfg)
+    base = roots[0]
     p = str(path or "").strip()
     if not p:
         p = "."
@@ -104,20 +154,27 @@ def _safe_path(cfg, path, must_exist=False):
         full = os.path.abspath(p)
     else:
         full = os.path.abspath(os.path.join(base, p))
-    if full != base and not full.startswith(base + os.sep):
-        raise ToolError("路径越界：只允许在工作目录 %s 内操作" % base)
+    if not any(_within(r, full) for r in roots):
+        raise ToolError("路径越界：只允许在 %s 内操作" % " | ".join(roots))
     if must_exist and not os.path.exists(full):
         raise ToolError("文件不存在：%s" % p)
     return full
 
 
 def _rel(cfg, full):
-    """绝对路径 -> 相对工作目录的短路径（给模型看更省 token）。"""
+    """绝对路径 -> 短路径（给模型看更省 token）。
+
+    在工作目录里 -> 相对路径；在额外放开的目录里 -> 绝对路径
+    （相对工作目录的 "../.." 对模型来说很难读）。
+    """
     base = work_dir(cfg)
     try:
-        return os.path.relpath(full, base).replace("\\", "/")
+        rel = os.path.relpath(full, base).replace("\\", "/")
+        if not rel.startswith(".."):
+            return rel
     except Exception:
-        return full
+        pass
+    return full
 
 
 # --------------------------------------------------------- 外部文本隔离
@@ -934,36 +991,36 @@ def t_get_location(args, cfg):
 
 TOOLS = [
     {"name": "list_files", "category": "file",
-     "description": "列出工作目录里的文件和文件夹",
+     "description": "列出目录里的文件和文件夹（默认工作目录；额外放开的目录里也能写绝对路径）",
      "parameters": {"type": "object", "properties": {
-         "path": _p("要列的目录（相对工作目录），默认当前目录")}, "required": []},
+         "path": _p("要列的目录（相对工作目录；也可写额外放开目录下的绝对路径），默认当前目录")}, "required": []},
      "fn": t_list_files},
     {"name": "read_file", "category": "file",
      "description": "读一个文本文件的内容",
      "parameters": {"type": "object", "properties": {
-         "path": _p("文件路径（相对工作目录）"),
+         "path": _p("文件路径（相对工作目录；也可写额外放开目录下的绝对路径）"),
          "max_chars": _p("最多读多少字符，默认 20000", "integer")}, "required": ["path"]},
      "fn": t_read_file},
     {"name": "write_file", "category": "file",
      "description": "写一个文本文件（会覆盖已有内容）",
      "parameters": {"type": "object", "properties": {
-         "path": _p("文件路径（相对工作目录）"),
+         "path": _p("文件路径（相对工作目录；也可写额外放开目录下的绝对路径）"),
          "content": _p("要写进去的内容")}, "required": ["path", "content"]},
      "fn": t_write_file},
     {"name": "edit_file", "category": "file",
      "description": "在文件里精确替换一段文字（old_string 必须原样出现）",
      "parameters": {"type": "object", "properties": {
-         "path": _p("文件路径（相对工作目录）"),
+         "path": _p("文件路径（相对工作目录；也可写额外放开目录下的绝对路径）"),
          "old_string": _p("要被替换的原文字"),
          "new_string": _p("替换成的新文字"),
          "replace_all": _p("true 表示全部替换，默认只换第一处", "boolean")},
          "required": ["path", "old_string", "new_string"]},
      "fn": t_edit_file},
     {"name": "search_files", "category": "file",
-     "description": "在工作目录里按正则搜索文本",
+     "description": "在目录里按正则搜索文本",
      "parameters": {"type": "object", "properties": {
          "pattern": _p("正则表达式"),
-         "path": _p("要搜的目录（相对工作目录），默认全部")}, "required": ["pattern"]},
+         "path": _p("要搜的目录（相对工作目录；也可写额外放开目录下的绝对路径），默认全部")}, "required": ["pattern"]},
      "fn": t_search_files},
 
     {"name": "open_url", "category": "web",
@@ -986,7 +1043,7 @@ TOOLS = [
     {"name": "image_info", "category": "image",
      "description": "看一张图片的尺寸/格式/大小",
      "parameters": {"type": "object", "properties": {
-         "path": _p("图片路径（相对工作目录）")}, "required": ["path"]},
+         "path": _p("图片路径（相对工作目录；也可写额外放开目录下的绝对路径）")}, "required": ["path"]},
      "fn": t_image_info},
     {"name": "image_resize", "category": "image",
      "description": "缩放图片",

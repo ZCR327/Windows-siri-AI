@@ -201,6 +201,8 @@ DEFAULTS = {
     "agent": {
         "enabled": False,
         "work_dir": "",
+        # 额外放开的目录（多个用「;」分隔）—— 文件类工具在它们里也能用
+        "file_roots": "",
         "allow_screen": False,
         "allow_shell": False,
         "max_rounds": 6,
@@ -438,6 +440,11 @@ SPEC = [
      "type": "text",
      "hint": "助手能读写的文件范围。留空 = 我的文档/Siri-OS。越出这个目录的文件一律拒绝。",
      "en_hint": "The only folder the assistant may read and write. Empty means Documents/Siri-OS; anything outside is refused."},
+    {"key": "agent.file_roots", "tab": "助理", "label": "额外可访问目录",
+     "en_label": "Extra accessible folders",
+     "type": "text",
+     "hint": "除了工作目录，助手还能读写哪些目录。多个目录用分号隔开；填盘符（比如 D:）就代表整个盘。留空 = 只有工作目录。",
+     "en_hint": "Folders the assistant may also read and write besides the working one. Separate them with semicolons - a bare drive letter means the whole drive. Empty means the working folder only."},
     {"key": "agent.allow_screen", "tab": "助理", "label": "允许操控电脑",
      "en_label": "Allow computer control",
      "type": "bool",

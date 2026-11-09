@@ -342,9 +342,9 @@ def _check_agent():
     ok("助理" in cfgstore.TABS, "页签里有「助理」")
     ok(cfgstore.TAB_EN.get("助理") == "Assistant", "「助理」有英文页签名")
     agent_specs = [s for s in cfgstore.SPEC if s.get("tab") == "助理"]
-    ok(len(agent_specs) == 5, "助理页有 5 个旋钮", "-> %d" % len(agent_specs))
+    ok(len(agent_specs) == 6, "助理页有 6 个旋钮", "-> %d" % len(agent_specs))
     keys = sorted(s["key"] for s in agent_specs)
-    want_keys = sorted(["agent.enabled", "agent.work_dir", "agent.allow_screen",
+    want_keys = sorted(["agent.enabled", "agent.work_dir", "agent.allow_screen", "agent.file_roots",
                          "agent.allow_shell", "agent.max_rounds"])
     ok(keys == want_keys, "助理页的旋钮键名对", "-> %s" % keys)
     for s in agent_specs:

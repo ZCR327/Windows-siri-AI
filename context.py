@@ -143,6 +143,12 @@ def system_context(cfg):
     if toolmod is not None:
         try:
             lines.append("工作目录：" + toolmod.work_dir(cfg))
+            try:
+                _ex = toolmod.extra_roots(cfg)
+                if _ex:
+                    lines.append("额外可访问目录：" + " ; ".join(_ex))
+            except Exception:
+                pass
             cats = toolmod.categories_in_use(cfg)
             if cats:
                 lines.append("已开启的能力：" + "、".join(cats))

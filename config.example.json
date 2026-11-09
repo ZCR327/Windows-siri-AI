@@ -82,6 +82,7 @@
   "agent": {
     "enabled": false,
     "work_dir": "",
+    "file_roots": "",
     "allow_screen": false,
     "allow_shell": false,
     "max_rounds": 6
