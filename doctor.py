@@ -108,7 +108,7 @@ def check_render(cfg, make_sheet=True):
     say(INFO, "--- 3/10 renderer self-test ---")
     try:
         import numpy as np
-        from siri_orb import GlowRenderer
+        from siri_orb import GlowRenderer, wave_radius
     except Exception as e:
         say(FAIL, "cannot import renderer: %s" % e)
         return
@@ -162,7 +162,7 @@ def check_render(cfg, make_sheet=True):
     say(OK, "timeline: press -> +%.2fs delay -> sweep %.2fs" % (delay, sweep))
     for tau in (0.0, 0.25, 0.5, 0.75, 1.0):
         wt = tau * sweep
-        r = gr.max_r * (1.0 - (1.0 - tau) ** 1.7)
+        r = gr.max_r * wave_radius(tau)
         say(OK, "  t=+%.3fs (tau=%.2f) radius=%6.0f px" % (delay + wt, tau, r))
 
     # (d) 对照图
@@ -194,7 +194,7 @@ def build_sheet(gr, bw, delay, sweep):
             wave = {"radius": -1.0e9, "width": bw}
         elif t < delay + sweep:
             tau = (t - delay) / max(1e-3, sweep)
-            wave = {"radius": gr.max_r * (1.0 - (1.0 - tau) ** 1.7), "width": bw}
+            wave = {"radius": gr.max_r * wave_radius(tau), "width": bw}
         else:
             wave = None
         img = gr.render(t, 1.0, "listening", wave)

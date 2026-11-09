@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from siri_orb import GlowRenderer
+from siri_orb import GlowRenderer, wave_radius
 
 W, H = 1440, 900
 
@@ -100,7 +100,7 @@ def main():
             wave = {"radius": -1.0e9, "width": bw}
         elif t < delay + sweep:
             tau = (t - delay) / max(1e-3, sweep)
-            wave = {"radius": gr.max_r * (1.0 - (1.0 - tau) ** 1.7), "width": bw}
+            wave = {"radius": gr.max_r * wave_radius(tau), "width": bw}
         else:
             wave = None
         sh = 0.0 if wave is not None else min(1.0, max(0.0, (t - delay - sweep) / 0.5))

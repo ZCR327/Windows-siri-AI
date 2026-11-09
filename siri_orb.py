@@ -189,6 +189,25 @@ def _to_qimage(arr):
     return img.copy()
 
 
+def wave_radius(tau):
+    """波前半径（占「最远角距离」的百分比，0..1）。
+
+    ⚠️ **恒速**（线性）。这里原来写的是 1-(1-tau)^1.7（前快后慢、末端趋零）：
+       波前是个圆，它撞到**离波源最远的那个角（左上角）**之后就再没有东西可推 ——
+       那个位置连续 5 帧位移 = 0（钉死 66ms），用户看到的就是
+       「每次扩散都卡在同一个地方」。参考视频沿边点亮的时刻也接近匀速
+       （ref/wave.txt：8.20s -> 9.87s 扫完一圈）。
+    ⚠️ **只此一份**：doctor / make_release_images / palette_check 都调它。
+       别在别处再抄一遍公式 —— 抄出去的那份一定会有漂移。
+    """
+    t = float(tau)
+    if t < 0.0:
+        return 0.0
+    if t > 1.0:
+        return 1.0
+    return t
+
+
 def glow_visible_spans(al, thr=8, ts=8):
     """量出一帧边光的**可见区域**，压成若干条横向区段（缓冲像素）。
 
@@ -934,6 +953,50 @@ class Overlay(QtWidgets.QWidget):
         o = self.cfg.get("glow_origin") or [0.9236, 0.9711]
         return (float(o[0]) * self.width(), float(o[1]) * self.height())
 
+    def _ensure_gr(self):
+        """拿到（必要时重建）渲染器。
+
+        重建条件：尺寸 / glow_scale / 波源位置 / 跑马灯参数 变了。
+        ⚠️ 只有这一份 —— warmup() 和 _tick_body 都调它。
+        """
+        origin = self._origin()
+        mq_period = float(self.cfg.get("marquee_period_sec", 6.0))
+        mq_trail = float(self.cfg.get("marquee_trail", 0.09))
+        # glow_scale：每个缓冲像素对应多少物理像素。
+        # 6 = 缓冲 480x300（2880x1800 的屏）。实测 render 149ms -> 25ms，整机 6fps -> 25fps。
+        # 想吃满画质改成 3（缓冲 960x600），代价是帧率掉到 6fps。
+        gscale = max(2, int(self.cfg.get("glow_scale", 6) or 6))
+        if getattr(self, "_gr", None) is None or self._gr.w != self.width() \
+                or self._gr.h != self.height() \
+                or self._gr.scale != gscale \
+                or self._gr.origin != origin \
+                or self._gr.marquee_period != max(0.5, mq_period) \
+                or self._gr.marquee_trail != max(0.02, mq_trail):
+            self._gr = GlowRenderer(self.width(), self.height(), scale=gscale,
+                                    origin=origin,
+                                    marquee_period=mq_period, marquee_trail=mq_trail)
+            self._or = OrbRenderer(256)
+        return self._gr
+
+    def warmup(self):
+        """预热渲染路径 —— **启动时跑一次**，把冷启动开销挪到没人按键的时候。
+
+        实测（2026-11-09）：同一个进程里第一次 render() 要 **53ms**
+        （PIL 高斯模糊的首次调用 + numpy 首次索引 + 颜色 LUT 的首次路径），
+        之后每帧只要 2.6-3.1ms —— 差 20 倍。
+        而渲染只在 glow > 0.012 时才发生，所以那 53ms 正好砸在
+        **第一次按 AI 键**的那一帧上，用户看到的就是「第一次扩散卡一下」。
+        """
+        try:
+            gr = self._ensure_gr()
+            arr = gr.render(0.0, 1.0, "listening",
+                            {"radius": 10.0, "width": 40.0}, 0.0, 0.0, u8=True)
+            _to_qimage_u8(arr)          # 顺带把 QImage 那条路也热掉
+            self._spans_from(arr)
+            _trace("warmup: render path primed")
+        except Exception as e:
+            _trace("warmup failed: %r" % (e,))
+
     def set_level(self, v):
         """麦克风电平（0..1）。起音快、消音慢，跟得上字头又不会闪。"""
         try:
@@ -1081,23 +1144,7 @@ class Overlay(QtWidgets.QWidget):
         else:
             self.glow += (target - self.glow) * 0.09
 
-        origin = self._origin()
-        mq_period = float(self.cfg.get("marquee_period_sec", 6.0))
-        mq_trail = float(self.cfg.get("marquee_trail", 0.09))
-        # glow_scale：每个缓冲像素对应多少物理像素。
-        # 6 = 缓冲 480x300（2880x1800 的屏）。实测 render 149ms -> 25ms，整机 6fps -> 25fps。
-        # 想吃满画质改成 3（缓冲 960x600），代价是帧率掉到 6fps。
-        gscale = max(2, int(self.cfg.get("glow_scale", 6) or 6))
-        if getattr(self, "_gr", None) is None or self._gr.w != self.width() \
-                or self._gr.h != self.height() \
-                or self._gr.scale != gscale \
-                or self._gr.origin != origin \
-                or self._gr.marquee_period != max(0.5, mq_period) \
-                or self._gr.marquee_trail != max(0.02, mq_trail):
-            self._gr = GlowRenderer(self.width(), self.height(), scale=gscale,
-                                    origin=origin,
-                                    marquee_period=mq_period, marquee_trail=mq_trail)
-            self._or = OrbRenderer(256)
+        self._ensure_gr()
 
         # ---- 径向扩散波前 ----
         delay = float(self.cfg.get("wave_delay_sec", 0.2))
@@ -1178,8 +1225,14 @@ class Overlay(QtWidgets.QWidget):
                 wave = {"radius": -1.0e9, "width": band_w}
             elif wt < sweep:
                 tau = wt / max(1e-3, sweep)
-                ease = 1.0 - (1.0 - tau) ** 1.7
-                wave = {"radius": max_r * ease, "width": band_w}
+                # ⚠️ **恒速**（线性半径）。别再用 1-(1-tau)^1.7 这种「前快后慢」的缓动：
+                #    末端速度趋零 -> 波前是个圆，它撞到**离波源最远的那个角（左上角）**
+                #    之后就没有任何东西可以再推进了 —— 实测那里连续 5 帧位移 = 0，
+                #    整整钉死 66ms，用户看到的就是「每次扩散都卡在同一个地方」。
+                #    参考视频沿边点亮的时刻也接近匀速（ref/wave.txt：8.20s -> 9.87s
+                #    扫完一圈，t=9.0s 时半径只到全程的 28-46%），1.7 次方反而太快。
+                #    自检见 wave_motion_check.py，公式只有 wave_radius() 这一份。
+                wave = {"radius": max_r * wave_radius(tau), "width": band_w}
             if wave is not None:
                 # 扩散期不开跑马灯（那 0.6 秒的主角是径向波）；
                 # 扩散结束后 0.35s 内淡入，否则会「啪」地闪一下
@@ -2519,6 +2572,9 @@ def main():
     if screen:
         overlay.setGeometry(screen.geometry())
     overlay.show()
+    # ⚠️ 预热渲染路径：第一次 render() 要 53ms（见 Overlay.warmup 的说明）。
+    #    不预热的话，这 53ms 会正好砸在用户第一次按 AI 键的那一帧上。
+    overlay.warmup()
 
     # 大致位置：**后台**预热 —— 定位要 2~4 秒，不能让第一句话干等。
     # 位置本身由 locate 模块管（缓存 + 定期刷新），这里只把活配置喂给它。
