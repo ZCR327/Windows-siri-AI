@@ -1562,6 +1562,19 @@ class CardWindow(QtWidgets.QWidget):
         self._restore_hwnd = 0
         self._restore_deadline = 0.0
         self._restore_timer = None
+        # 「多久没动静就放弃」的滑动超时器：
+        #   每次有识别结果进来 / 麦克风有信号 -> 截止时间往后推。
+        self._timeout_sec = 0.0
+        self._timeout_hard_deadline = 0.0
+        # 麦克风电平监测线程只写这一个时间戳（不碰 Qt）
+        self._speech_until = 0.0
+        self._watch_thread = None
+        self._watch_stop = True
+        try:
+            _stt = (cfg.get("stt") or {})
+            self._detect_speech = bool(_stt.get("detect_speech", True))
+        except Exception:
+            self._detect_speech = True
         self.editor.textChanged.connect(self._on_text_changed)
 
     # ---------------------------------------------------------- 状态与位置
@@ -1701,6 +1714,17 @@ class CardWindow(QtWidgets.QWidget):
         # ⚠️ 光「会话活着」还不够：静音窗口（用来盖住开始录音那声「叮」）
         #   **连麦克风采集一起压**，静音没解除之前开口 = 一个字都收不到。
         #   所以「麦克风已就绪」必须等静音真的解除。
+        # ⚠️ 自愈：静音窗口重叠（连按两次 AI 键）会让语音输入宿主的会话**永久静音**，
+        #   麦克风从此是死的 —— 用户说话一个字都收不到，表现是「按 AI 键没反应」。
+        #   我们的静音窗口没在跑、它却还是静音 = 卡死了 -> 直接解开。
+        try:
+            if (winh_mod is not None
+                    and winh_mod.voice_capture_muted()
+                    and not winh_mod.voice_mute_active()):
+                if winh_mod.unstick_voice_capture():
+                    _trace("voice capture was stuck muted -> unmuted")
+        except Exception:
+            pass
         if self._live_seen and not self._ready:
             try:
                 muted = bool(winh_mod is not None
@@ -1709,6 +1733,17 @@ class CardWindow(QtWidgets.QWidget):
                 muted = False
             if not muted:
                 self._ready = True
+                # 麦克风真的能收音了 -> 「多久没动静就放弃」的计时从这一刻起算
+                #   （之前那几秒是静音窗口 + 面板还没开，不能算用户的沉默）
+                self.touch_timeout("mic ready")
+        # ⚠️ 他还在说话（麦克风有信号）-> 别把卡片掀了。
+        #   Windows 语音输入是**停顿才提交**，长句子中间卡片里一直是空的
+        #   -> 只看「有没有新字」会把他切在句子中间。
+        try:
+            if time.time() < self._speech_until:
+                self.touch_timeout("speech")
+        except Exception:
+            pass
         if self._ready == self._live_state:
             return
         self._live_state = self._ready
@@ -1773,11 +1808,101 @@ class CardWindow(QtWidgets.QWidget):
         self.close_card()
 
     # ---------------------------------------------------------- 兜底计时器
-    def arm_timeout(self, sec, cb):
-        """Win+H 阶段兜底：没人说话也没人确认，卡片不能一直挂着抢键盘。"""
-        self._winh_cb = cb
+    # ------------------------------------------------ 说话检测（滑动超时的依据）
+    def start_speech_watch(self):
+        """后台采麦克风电平：他在说话就别把卡片掀了。
+
+        为什么需要（2026-11-09 21:36 实测）：Windows 的语音输入是**停顿才提交**——
+        一整句话只在停顿处一次性注入卡片（实测 31 个字一次进来），
+        所以长句子中间卡片里一直是空的。只看「有没有新字」判不出「他还在不在说」，
+        固定 10 秒超时就切在句子中间 = 用户说的「说话说到一半强退」。
+
+        打不开麦克风就自己退化成「只看新字」（不报错、不影响别的功能）。
+        """
+        if self._watch_thread is not None:
+            return
+        if not self._detect_speech:
+            return
+        self._watch_stop = False
         try:
-            self._winh_timer.start(int(max(1.0, float(sec)) * 1000))
+            import threading
+            self._watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
+            self._watch_thread.start()
+        except Exception:
+            self._watch_thread = None
+
+    def stop_speech_watch(self):
+        self._watch_stop = True
+        self._watch_thread = None
+
+    def _watch_loop(self):
+        """采样线程：只写一个时间戳，不碰 Qt（跨线程碰 GUI 会出事）。"""
+        meter = None
+        floor = 0.02
+        try:
+            import mic_level
+            meter = mic_level.MicMeter(block_ms=100)
+        except Exception as e:
+            _trace("speech watch: mic unavailable (%r) -> timeout slides on text only"
+                   % (e,))
+            return
+        try:
+            while not self._watch_stop:
+                try:
+                    rms, _db, _peak = meter.block()
+                except Exception:
+                    break
+                try:
+                    if rms <= 0:
+                        continue
+                    # 噪声底：掉得快、涨得慢
+                    if rms < floor:
+                        floor = rms
+                    else:
+                        floor = min(rms, floor * 1.2 + 0.0005)
+                    thr = min(max(0.02, floor * 6.0), 0.08)
+                    if rms >= thr:
+                        self._speech_until = time.time() + 0.4
+                except Exception:
+                    pass
+        finally:
+            try:
+                meter.close()
+            except Exception:
+                pass
+
+    def touch_timeout(self, reason=""):
+        """「多久没动静就放弃」这个截止时间往后推一个窗口。"""
+        try:
+            if self._winh_cb is None:
+                return False
+            now = time.time()
+            delay = self._timeout_sec
+            if self._timeout_hard_deadline:
+                left = self._timeout_hard_deadline - now
+                if left <= 0:
+                    return False
+                delay = min(delay, max(0.2, left))
+            self._winh_timer.start(int(delay * 1000))
+            return True
+        except Exception:
+            return False
+
+    def arm_timeout(self, sec, cb, max_sec=None):
+        """Win+H 阶段兜底：没人说话也没人确认，卡片不能一直挂着抢键盘。
+
+        ⚠️ 2026-11-09 21:36 修：这里原来是**从按键那刻起算的一次性定时器**，
+        用户正在说话也会被掀了 —— 实测 31 个字刚进来，2 秒后卡片就被关，
+        语音会话一起被 Esc 掉 =「说话说到一半强退」。
+        现在改成**滑动超时**：
+          - 每次有识别结果进来 / 麦克风有信号 -> 截止时间往后推；
+          - 绝对上限 max_sec 兜底（卡片不会永远挂着）。
+        """
+        self._winh_cb = cb
+        self._timeout_sec = max(1.0, float(sec))
+        self._timeout_hard_deadline = (time.time() + float(max_sec)) if max_sec else 0.0
+        try:
+            self._winh_timer.start(int(self._timeout_sec * 1000))
         except Exception:
             pass
         # 只有 Win+H 阶段才有「麦克风就绪」这回事
@@ -1785,6 +1910,7 @@ class CardWindow(QtWidgets.QWidget):
             self._live_timer.start()
         except Exception:
             pass
+        self.start_speech_watch()
 
     def cancel_timeout(self):
         try:
@@ -1792,13 +1918,19 @@ class CardWindow(QtWidgets.QWidget):
         except Exception:
             pass
         self._winh_cb = None
+        # 所有收尾路径都经过 close_card -> cancel_timeout，
+        # 这里停掉麦克风监测线程（不然它会长期占着麦克风）
+        self.stop_speech_watch()
 
     def _winh_timeout(self):
         cb = self._winh_cb
         self._winh_cb = None
         if cb is None:
             return
-        _trace("winh timeout: nobody answered, closing the card")
+        _trace("winh timeout: nobody answered, closing the card%s"
+               % (" (hit the hard cap)"
+                  if (self._timeout_hard_deadline
+                      and time.time() >= self._timeout_hard_deadline) else ""))
         try:
             cb()
         except Exception:
@@ -1934,6 +2066,8 @@ class CardWindow(QtWidgets.QWidget):
             who = ("keyboard" if keyhook_mod.last_physical_key_recent(0.8)
                    else "voice/other")
             _trace("card text changed by %s: %d chars" % (who, n))
+            # 有新字 = 他还在说（或在打字）-> 截止时间往后推
+            self.touch_timeout("text")
         except Exception:
             pass
 
@@ -2210,7 +2344,10 @@ def _begin_winh(overlay, card):
             except Exception:
                 pass
 
-        card.arm_timeout(winh_timeout, _give_up)
+        # 滑动超时的绝对上限：卡片最多活这么久（与「隐藏语音面板」的时长一致，
+        #   超过它 Windows 面板就会自己冒出来）
+        hide_max = float(stt_cfg.get("hide_max_seconds", 120.0) or 120.0)
+        card.arm_timeout(winh_timeout, _give_up, max_sec=hide_max)
         # 开始录音那声「叮」：提前把语音输入宿主那个音频会话压掉（只压这一小会儿）
         # 注意：必须排在发 Win+H **之前** —— 提示音是 Windows 收到按键就播的
         if stt_cfg.get("mute_start_sound", True):

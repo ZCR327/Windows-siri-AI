@@ -45,6 +45,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import ctypes
+import time
 
 import win_h
 import siri_orb
@@ -157,6 +158,7 @@ def part_c():
 class FakeCard(object):
     def __init__(self):
         self.armed = None
+        self.armed_max = None
         self.editor = type("E", (object,), {"setFocus": lambda *a, **k: None})()
 
     def remember_foreground(self):
@@ -171,8 +173,9 @@ class FakeCard(object):
     def mark_focus_stolen(self, ok):
         pass
 
-    def arm_timeout(self, sec, cb):
+    def arm_timeout(self, sec, cb, max_sec=None):
         self.armed = (sec, cb)
+        self.armed_max = max_sec
 
 
 class FakeOverlay(object):
@@ -195,6 +198,7 @@ def part_d():
         siri_orb._begin_winh(ov, card)
         check("timeout comes from stt.timeout_sec", card.armed[0], 10.0)
         check("the old hardcoded 45 is gone", card.armed[0] == 45.0, False)
+        check("the card gets a hard cap", card.armed_max, 120.0)
     finally:
         siri_orb._send_winh = os_
         siri_orb.winh_mod.force_foreground = off
@@ -295,6 +299,8 @@ def part_g():
     oa = siri_orb.winh_mod.voice_ui_active
     om = siri_orb.winh_mod.voice_capture_muted
     try:
+        # the live capture state must not decide the outcome of a self check
+        siri_orb.winh_mod.voice_capture_muted = lambda: False
         ui = i18n.ui_lang({})
         hint = i18n.t(ui, "reply.winh_hint")
         start = i18n.t(ui, "reply.winh_starting")
@@ -402,6 +408,125 @@ def part_h():
     print("")
 
 
+def part_i():
+    print("=== I. the card is not yanked away while the user is still talking ===")
+    # 2026-11-09 21:36 trace: 31 chars arrived, then 2 s later the card was
+    # closed by the fixed 10 s timer -- the user was cut off mid-sentence.
+    # Windows' voice input only commits text at a pause, so during a long
+    # sentence the box stays empty and a fixed timer always cuts in.
+    # Now it is a SLIDING timeout: text / mic signal push the deadline.
+    card = siri_orb.CardWindow({}, FakeHost())
+    card._detect_speech = False        # never open the real mic in a self check
+    card.editing = True
+    card.arm_timeout(10, lambda: None, max_sec=120)
+    check("the window comes from the knob", card._timeout_sec, 10.0)
+    check("the hard cap is remembered", card._timeout_hard_deadline > 0, True)
+
+    card._winh_timer.stop()
+    ok = card.touch_timeout("test")
+    check("a touch is accepted", ok, True)
+    check("a touch re-arms the timer", card._winh_timer.isActive(), True)
+
+    # close to the hard cap the touch is clamped, not refused
+    card._timeout_hard_deadline = time.time() + 0.5
+    card._winh_timer.stop()
+    ok = card.touch_timeout("test")
+    check("a touch near the cap is still accepted", ok, True)
+    check("the delay is clamped to the cap", card._winh_timer.interval() <= 600, True)
+
+    # past the hard cap -> nothing extends any more
+    card._timeout_hard_deadline = time.time() - 1
+    check("past the hard cap nothing extends", card.touch_timeout("test"), False)
+
+    # text arriving slides the timeout
+    card2 = siri_orb.CardWindow({}, FakeHost())
+    card2._detect_speech = False
+    card2.editing = True
+    card2.arm_timeout(10, lambda: None, max_sec=120)
+    card2._winh_timer.stop()
+    card2.editor.setPlainText("hello")
+    check("text arriving slides the timeout", card2._winh_timer.isActive(), True)
+
+    # the mic becoming ready slides it too
+    card3 = siri_orb.CardWindow({}, FakeHost())
+    card3._detect_speech = False
+    card3.editing = True
+    card3.arm_timeout(10, lambda: None, max_sec=120)
+    card3._winh_timer.stop()
+    old_live = siri_orb.winh_mod.voice_ui_active
+    old_muted = siri_orb.winh_mod.voice_capture_muted
+    try:
+        siri_orb.winh_mod.voice_ui_active = lambda: True
+        siri_orb.winh_mod.voice_capture_muted = lambda: False
+        card3._poll_voice_live()
+        check("the mic becoming ready slides the timeout",
+              card3._winh_timer.isActive(), True)
+    finally:
+        siri_orb.winh_mod.voice_ui_active = old_live
+        siri_orb.winh_mod.voice_capture_muted = old_muted
+
+    # a voice signal slides it as well
+    card4 = siri_orb.CardWindow({}, FakeHost())
+    card4._detect_speech = False
+    card4.editing = True
+    card4.arm_timeout(10, lambda: None, max_sec=120)
+    card4._winh_timer.stop()
+    card4._speech_until = time.time() + 1.0
+    card4._poll_voice_live()
+    check("a voice signal slides the timeout", card4._winh_timer.isActive(), True)
+
+    # closing stops the mic watch (otherwise it would hold the mic forever)
+    card5 = siri_orb.CardWindow({}, FakeHost())
+    card5._detect_speech = False
+    card5.arm_timeout(10, lambda: None, max_sec=120)
+    card5.cancel_timeout()
+    check("closing stops the speech watch", card5._watch_stop, True)
+    check("the watch thread is released", card5._watch_thread, None)
+    print("")
+
+
+def part_j():
+    print("=== J. overlapping mute windows cannot leave the mic muted ===")
+    # 2026-11-09 20:41: two overlapping mute windows -> the second one saved
+    # the ALREADY muted state and restored it -> the voice session stayed
+    # muted forever = a dead microphone (the user speaks, nothing arrives).
+    class FakeSession(object):
+        def __init__(self):
+            self.owner = "textinputhost.exe"
+            self.display_name = "fake"
+            self.pid = 4242
+            self.state = 1
+            self.volume = 1.0
+            self.muted = False
+
+        def key(self):
+            return "fake-session"
+
+        def set_volume(self, v):
+            self.volume = v
+
+        def set_mute(self, f):
+            self.muted = bool(f)
+
+        def free(self):
+            pass
+
+    fake = FakeSession()
+    old_list = win_h.list_audio_sessions
+    try:
+        win_h.list_audio_sessions = lambda role=None: [fake]
+        win_h.mute_voice_start_sound(0.4)
+        win_h.mute_voice_start_sound(0.4)      # overlaps the first one
+        time.sleep(1.6)
+        check("overlapping mute windows do not leave the mic muted",
+              fake.muted, False)
+        check("the volume is back", fake.volume, 1.0)
+        check("no mute window is left open", win_h.voice_mute_active(), False)
+    finally:
+        win_h.list_audio_sessions = old_list
+    print("")
+
+
 def main():
     print("Voice-session guard self check")
     print("")
@@ -413,6 +538,8 @@ def main():
     part_f()
     part_g()
     part_h()
+    part_i()
+    part_j()
     print("=== summary ===")
     if FAILS:
         for f in FAILS:

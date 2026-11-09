@@ -19,8 +19,17 @@ Win+H 走 Windows 自带的「语音输入」（Win11 起是 Microsoft 在线语
 """
 import ctypes
 import os
+import threading
 import time
 from ctypes import wintypes
+
+# ⚠️ 静音窗口的全局状态（2026-11-09 22:05 修）
+#   两次静音窗口重叠时，旧实现会把「已经静音」当成原始值存下来、到期再恢复回去
+#   -> 语音输入宿主的会话**永久静音** = 麦克风是死的，用户说话一个字都收不到。
+#   现在用**引用计数**：原始值只存第一次，只有最后一个窗口结束才恢复。
+_MUTE_LOCK = threading.Lock()
+_MUTE_SAVED = {}      # key -> (session, volume, muted)
+_MUTE_DEPTH = 0
 
 
 class _RECT(ctypes.Structure):
@@ -1151,13 +1160,24 @@ def mute_voice_start_sound(seconds=1.8, interval=0.08, on_change=None):
     到期按原值恢复。其它应用的声音一点不受影响。
 
     在 Win+H **发出去之前**调用最好：那时候就把会话压住，等提示音播就无声了。
+
+    ⚠️⚠️ 2026-11-09 22:05 修：**窗口重叠会把麦克风永久压死**。
+    旧实现每次都存一次「当前状态」、到期再存回去：
+      窗口 A：存 (1.0, 未静音) -> 压成静音
+      窗口 B（与 A 重叠）：存到的已经是静音态 -> 到期恢复成静音态
+      结果：语音输入宿主的会话**永久静音** = 麦克风是死的，
+      用户说话一个字都收不到（实测 2026-11-09 20:41 连按两次 AI 键就中招）。
+    现在：**引用计数 + 原始值只存第一次**，最后一个窗口结束才恢复。
     """
-    import threading
+    global _MUTE_DEPTH
     my_pid = os.getpid()
 
+    with _MUTE_LOCK:
+        _MUTE_DEPTH += 1
+
     def run():
+        global _MUTE_DEPTH
         _com_init()
-        saved = []          # [(session, volume, muted)]
         seen = set()
         end = time.time() + max(0.2, float(seconds or 1.8))
         try:
@@ -1174,7 +1194,13 @@ def mute_voice_start_sound(seconds=1.8, interval=0.08, on_change=None):
                                     s.free()
                                     continue
                                 seen.add(k)
-                                saved.append((s, s.volume, s.muted))
+                                # 已经被我们压过（上一轮窗口还没结束）-> 不要再存一次
+                                with _MUTE_LOCK:
+                                    if k in _MUTE_SAVED:
+                                        s.free()
+                                        continue
+                                    vol, muted = s.volume, s.muted
+                                    _MUTE_SAVED[k] = (s, vol, muted)
                                 s.set_volume(0.0)
                                 s.set_mute(True)
                                 if on_change:
@@ -1186,7 +1212,13 @@ def mute_voice_start_sound(seconds=1.8, interval=0.08, on_change=None):
                     pass
                 time.sleep(interval)
         finally:
-            for s, vol, muted in saved:
+            with _MUTE_LOCK:
+                _MUTE_DEPTH = max(0, _MUTE_DEPTH - 1)
+                last = (_MUTE_DEPTH == 0)
+                items = list(_MUTE_SAVED.values()) if last else []
+                if last:
+                    _MUTE_SAVED.clear()
+            for s, vol, muted in items:
                 try:
                     if vol is not None:
                         s.set_volume(vol)
@@ -1198,7 +1230,50 @@ def mute_voice_start_sound(seconds=1.8, interval=0.08, on_change=None):
                 except Exception:
                     pass
                 s.free()
+            if last:
+                # 兜底：会话对象可能已经失效（Windows 重建了会话），恢复会失败，
+                # 而失败被上面的 except 吞掉 -> 留下一个永久静音的麦克风。
+                # 直接按名字找回来解掉。
+                try:
+                    if unstick_voice_capture():
+                        if on_change:
+                            on_change("unstuck a stuck-muted voice session")
+                except Exception:
+                    pass
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
     return t
+
+
+def voice_mute_active():
+    """我们自己的静音窗口现在是不是还开着（区分「我们压的」和「卡死的」）。"""
+    try:
+        with _MUTE_LOCK:
+            return _MUTE_DEPTH > 0
+    except Exception:
+        return False
+
+
+def unstick_voice_capture():
+    """把卡死的静音解开：麦克风被静音 = 用户说话一个字都收不到。
+
+    2026-11-09 实测踩到过：静音窗口重叠会让语音输入宿主的会话永久静音，
+    而恢复失败被 except 吞掉，日志里看不出来 —— 表现是「按 AI 键没反应」。
+    """
+    ok = False
+    for role in (_ROLE_MULTIMEDIA, _ROLE_CONSOLE):
+        try:
+            for s in list_audio_sessions(role):
+                try:
+                    if s.owner == _VOICE_PANEL_PROC and s.muted:
+                        s.set_volume(1.0)
+                        s.set_mute(False)
+                        ok = True
+                except Exception:
+                    pass
+                finally:
+                    s.free()
+        except Exception:
+            pass
+    return ok
