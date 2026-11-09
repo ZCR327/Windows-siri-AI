@@ -792,6 +792,10 @@ class Overlay(QtWidgets.QWidget):
         self._last_topmost = 0.0
         self.t0 = time.time()
         self.press_time = None
+        # 按钮亮起的时刻（长按手势：按下就先亮它当反馈，但还不触发）
+        self.button_time = None
+        self._hold_start = 0.0      # 长按手势：按下时刻
+        self._hold_until = 0.0      # 长按手势：触发时刻
         self.glow_img = None
         self.orb_img = None
         # ---- 局部重绘（只画脏矩形）----
@@ -857,6 +861,25 @@ class Overlay(QtWidgets.QWidget):
     def mark_press(self):
         """按键触发的那一刻：按钮立刻亮起，0.2 秒后光才开始从按钮扩散。"""
         self.press_time = time.time()
+        self.button_time = self.press_time
+        self._hold_start = 0.0
+        self._hold_until = 0.0
+
+    def mark_hold_start(self, hold_sec=0.5):
+        """长按手势：先亮按钮当反馈，但**不开卡片、不扩散**。
+
+        等按住满 hold_sec 才真的触发（见 keyhook.HoldGesture）。
+        """
+        now = time.time()
+        self.button_time = now
+        self._hold_start = now
+        self._hold_until = now + max(0.05, float(hold_sec))
+
+    def mark_hold_end(self):
+        """短按结束（没到阈值就松手）：什么都不触发，只把按住时的余晖收掉。"""
+        self._hold_start = 0.0
+        self._hold_until = 0.0
+        self.button_time = 0.0
 
     def demo_wave(self, dur=2.6):
         """跑一次扩散 + 跑马灯（**不碰麦克风、不问模型**）。
@@ -1153,7 +1176,9 @@ class Overlay(QtWidgets.QWidget):
         wave, marquee_gain = self._wave_state(now, self.press_time, delay, sweep,
                                               self._gr.max_r, band_w)
 
-        if self.glow > 0.012:
+        # 长按手势期间（还没到触发点）：也要出画面，否则按钮亮不起来
+        hold_active = self._hold_until > 0.0 and time.time() < self._hold_until
+        if self.glow > 0.012 or hold_active:
             cap = float(self.cfg.get("glow_intensity", 1.0) or 1.0)
             intensity = max(0.0, min(1.0, self.glow * cap))
             # ⚠️ 渲染**必须留在 GUI 线程**。2026-11-09 实测过「挪到工作线程」：
@@ -1350,9 +1375,10 @@ class Overlay(QtWidgets.QWidget):
     def _draw_button(self, p):
         """按钮本体：按下即亮，作为光带的起点（参考视频里是侧边按键）。"""
         gr = getattr(self, "_gr", None)
-        if gr is None or self.press_time is None:
+        bt = self.button_time or self.press_time
+        if gr is None or bt is None:
             return
-        age = time.time() - self.press_time
+        age = time.time() - bt
         if age > 6.0:
             return
         ox, oy = gr.origin
@@ -1369,6 +1395,19 @@ class Overlay(QtWidgets.QWidget):
         p.drawEllipse(QtCore.QRectF(ox - r * 3.2, oy - r * 3.2, r * 6.4, r * 6.4))
         p.setBrush(QtGui.QColor(255, 255, 255, int(240 * lit)))
         p.drawEllipse(QtCore.QRectF(ox - r, oy - r, r * 2, r * 2))
+        # ---- 长按进度环 ----
+        # 按住小米键时绕按钮画一圈进度，转满 = 触发（2026-11-09 加）
+        if self._hold_start > 0.0 and self._hold_until > self._hold_start:
+            now = time.time()
+            if now < self._hold_until:
+                prog = (now - self._hold_start) / (self._hold_until - self._hold_start)
+                prog = max(0.0, min(1.0, prog))
+                rp = r * 3.0
+                p.setPen(QtGui.QPen(QtGui.QColor(150, 220, 255, 210), 2.0))
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawArc(QtCore.QRectF(ox - rp, oy - rp, rp * 2, rp * 2),
+                          int(-90 * 16), int(prog * 360 * 16))
+                p.setPen(QtCore.Qt.NoPen)
 
     def caption_geom(self):
         """卡片几何（相对覆盖层坐标）：(x, y, w, h, label, label_h, font)。
@@ -2678,6 +2717,18 @@ def main():
         voice_thread.sig_level.connect(overlay.set_level)
         voice_thread.start()
 
+    def press_start():
+        """按住小米键：先亮按钮 + 画进度环当反馈，但**不开卡片、不扩散**。
+
+        等按住满阈值才真的触发（见 keyhook.HoldGesture）。
+        """
+        overlay.mark_hold_start(
+            max(0.05, float(overlay.cfg.get("hold_trigger_ms", 500) or 500) / 1000.0))
+
+    def press_end(held):
+        """短按（没到阈值就松手）：什么都不触发，只把按住时的余晖收掉。"""
+        overlay.mark_hold_end()
+
     if demo:
         run_demo(overlay)
     else:
@@ -2699,7 +2750,11 @@ def main():
             vk=cfg.get("xiaomi_vk"),
             log_path=KEY_LOG,
             log_all=bool(cfg.get("log_all_keys", True)),
-            swallow=bool(cfg.get("swallow_matched_key", True)))
+            swallow=bool(cfg.get("swallow_matched_key", True)),
+            # 长按手势：阈值**每次按下时**现取 —— 设置面板改完立刻生效，不用重启
+            hold_sec=lambda: max(0.0, float(overlay.cfg.get("hold_trigger_ms", 500) or 0)) / 1000.0,
+            on_press_start=press_start,
+            on_short_press=press_end)
         hook.start()
         time.sleep(0.4)
         if hook.error:

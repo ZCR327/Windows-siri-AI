@@ -11,6 +11,7 @@ kernel32 = ctypes.windll.kernel32
 
 WH_KEYBOARD_LL = 13
 WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
+WM_KEYUP, WM_SYSKEYUP = 0x0101, 0x0105
 WM_HOTKEY = 0x0312
 
 MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN = 0x0001, 0x0002, 0x0004, 0x0008
@@ -132,9 +133,115 @@ def last_physical_key_recent(max_age=0.8):
         return False
 
 
+
+class HoldGesture(object):
+    """长按手势的状态机 —— 纯逻辑，不碰任何 Qt/Windows 东西，所以能单测。
+
+    规则（2026-11-09 用户拍板）：
+      - **按下**：开始计时，**不触发**；通知宿主「按住了」（宿主据此先亮按钮给反馈）
+      - **按住满 hold_sec**：**立刻触发**（还按着就开始扩散 + 弹卡片）
+      - **不到 hold_sec 就松手**：**什么都不做**（纯防误触）
+      - hold_sec = 0：退化成老行为（按下就触发）
+
+    ⚠️ **自动重复**：按住不放时 Windows 会持续发 KEYDOWN（先 500ms 后 ~30 次/秒）。
+       每次都当新按下会把计时器一直重置 -> 长按永远触发不了。
+       所以「已经按着的时候再来 KEYDOWN」一律忽略（见 press()）。
+    """
+
+    def __init__(self, hold_sec=0.5, on_press_start=None, on_fire=None, on_short=None):
+        # hold_sec 可以是**数字**，也可以是**取阈值的函数**（每次按下时问一次）——
+        # 后者让设置面板改完阈值立刻生效，不用重启助手。
+        self.hold_sec = hold_sec
+        self.on_press_start = on_press_start
+        self.on_fire = on_fire
+        self.on_short = on_short
+        self._press_t = None
+        self._fired = False
+        self._timer = None
+        self._lock = threading.Lock()
+
+    # ---- 宿主调用 ----
+    def press(self, t=None):
+        t = time.time() if t is None else float(t)
+        fire = False
+        with self._lock:
+            if self._press_t is not None:
+                return              # 自动重复：已经在按着了，别重置计时
+            self._press_t = t
+            self._fired = False
+            self._cancel_timer()
+            hs = self.hold_sec() if callable(self.hold_sec) else self.hold_sec
+            hs = max(0.0, float(hs))
+            if hs <= 0.0:
+                self._fired = True
+                fire = True
+            else:
+                self._timer = threading.Timer(hs, self._on_timeout)
+                self._timer.daemon = True
+                self._timer.start()
+        if self.on_press_start:
+            try:
+                self.on_press_start()
+            except Exception:
+                pass
+        if fire:
+            self._do_fire()
+
+    def release(self, t=None):
+        t = time.time() if t is None else float(t)
+        with self._lock:
+            fired = self._fired
+            held = (t - self._press_t) if self._press_t is not None else 0.0
+            self._press_t = None
+            self._fired = False
+            self._cancel_timer()
+        if fired:
+            return                 # 已经触发过了，松手不用再管
+        if self.on_short:
+            try:
+                self.on_short(held)
+            except Exception:
+                pass
+
+    @property
+    def holding(self):
+        with self._lock:
+            return self._press_t is not None and not self._fired
+
+    def held_seconds(self):
+        with self._lock:
+            if self._press_t is None:
+                return 0.0
+            return time.time() - self._press_t
+
+    # ---- 内部 ----
+    def _on_timeout(self):
+        with self._lock:
+            if self._press_t is None or self._fired:
+                return
+            self._fired = True
+        self._do_fire()
+
+    def _do_fire(self):
+        if self.on_fire:
+            try:
+                self.on_fire()
+            except Exception:
+                pass
+
+    def _cancel_timer(self):
+        if self._timer is not None:
+            try:
+                self._timer.cancel()
+            except Exception:
+                pass
+            self._timer = None
+
+
 class KeyHook(threading.Thread):
     def __init__(self, on_hotkey=None, on_match=None, hotkey="ctrl+alt+space",
-                 scan_code=None, vk=None, log_path=None, log_all=True, swallow=True):
+                 scan_code=None, vk=None, log_path=None, log_all=True, swallow=True,
+                 hold_sec=0.0, on_press_start=None, on_short_press=None):
         threading.Thread.__init__(self)
         self.daemon = True
         self.on_hotkey = on_hotkey
@@ -150,6 +257,12 @@ class KeyHook(threading.Thread):
         self._hook = None
         self._proc = None
         self._last_fire = 0.0
+        # 长按手势：hold_sec > 0 时，按下不触发，按住满才触发
+        self.gesture = HoldGesture(
+            hold_sec=hold_sec,
+            on_press_start=on_press_start,
+            on_fire=lambda: self._fire("match"),
+            on_short=on_short_press)
 
     def _log(self, vk, sc, flags):
         if not self.log_path:
@@ -206,7 +319,20 @@ class KeyHook(threading.Thread):
                 if self.log_all or matched:
                     self._log(vk, sc, fl)
                 if matched:
-                    self._fire("match")
+                    # ⚠️ 长按手势：按下**不触发**，按住满阈值才触发（见 HoldGesture）。
+                    #    hold_sec = 0 时 HoldGesture 自己会立刻触发 = 老行为。
+                    self.gesture.press()
+                    if self.swallow:
+                        return 1
+            elif wparam in (WM_KEYUP, WM_SYSKEYUP):
+                try:
+                    kbd = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                    vk, sc = int(kbd.vkCode), int(kbd.scanCode)
+                except Exception:
+                    vk = sc = 0
+                if self._match(vk, sc):
+                    # 松手：短按（没到阈值）= 什么都不做；已触发过的 = 不用管
+                    self.gesture.release()
                     if self.swallow:
                         return 1
         return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)

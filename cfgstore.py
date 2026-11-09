@@ -162,6 +162,8 @@ def provider_label(name, lang="zh"):
 # 这份就是当前 config.json 里那套已验收的参数
 DEFAULTS = {
     "hotkey": "ctrl+alt+space",
+    # 小米键长按多久才触发（0 = 按下就触发，旧行为）
+    "hold_trigger_ms": 500,
     "xiaomi_scan_code": 114,
     "xiaomi_vk": 255,
     "swallow_matched_key": True,
@@ -392,6 +394,10 @@ SPEC = [
      "type": "text",
      "hint": "小米键之外的备用唤醒方式，格式如 ctrl+alt+space。",
      "en_hint": "A backup way to wake the assistant besides the Xiaomi key, e.g. ctrl+alt+space."},
+    {"key": "hold_trigger_ms", "tab": "键位", "label": "长按触发（毫秒）", "en_label": "Hold to trigger (ms)",
+     "type": "int", "min": 0, "max": 2000, "step": 50,
+     "hint": "小米键要按住这么久才弹卡片 + 扩散。0 = 按下就触发（旧行为）。按住期间按钮上有个进度环；不到这个时长就松手 = 什么都不做（防误触）。改完立刻生效，不用重启。",
+     "en_hint": "How long the Xiaomi key must be held before the card appears and the glow expands. 0 = fire immediately (old behaviour). A progress ring around the button shows the hold; letting go earlier does nothing. Takes effect immediately."},
     {"key": "xiaomi_scan_code", "tab": "键位", "label": "小米键扫描码", "en_label": "Xiaomi key scan code",
      "type": "int", "min": 0, "max": 255, "step": 1,
      "hint": "0 = 不绑定。当前这台机器是 114 (0x72)。",
