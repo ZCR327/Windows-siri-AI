@@ -21,7 +21,7 @@ import re
 import time
 
 try:
-    import requests
+    from netdeps import requests
 except Exception:  # pragma: no cover
     requests = None
 
@@ -116,7 +116,7 @@ def place_candidates(text):
 
 # ------------------------------------------------------------------ 网络
 def _get_json(url, params):
-    if requests is None:
+    if not requests:
         raise RuntimeError("requests 不可用")
     r = requests.get(url, params=params, timeout=TIMEOUT,
                      headers={"User-Agent": "Siri-OS/1.0"})

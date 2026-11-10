@@ -23,8 +23,8 @@ import sys
 import time
 
 try:
-    import requests
-except Exception:      # pragma: no cover
+    from netdeps import requests
+except Exception:  # pragma: no cover
     requests = None
 
 
@@ -410,7 +410,7 @@ def t_fetch_page(args, cfg):
         raise ToolError("缺少 url 参数")
     if not re.match(r"^https?://", url, re.I):
         raise ToolError("只支持 http/https")
-    if requests is None:
+    if not requests:
         raise ToolError("没装 requests")
     try:
         r = requests.get(url, timeout=20, headers={
@@ -432,7 +432,7 @@ def t_search_web(args, cfg):
     q = (args.get("query") or "").strip()
     if not q:
         raise ToolError("缺少 query 参数")
-    if requests is None:
+    if not requests:
         raise ToolError("没装 requests")
     url = "https://html.duckduckgo.com/html/?q=" + _urlquote(q)
     try:

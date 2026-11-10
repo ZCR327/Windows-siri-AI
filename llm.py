@@ -15,7 +15,7 @@ import re
 import json
 
 try:
-    import requests
+    from netdeps import requests
 except Exception:  # pragma: no cover
     requests = None
 
@@ -470,7 +470,7 @@ def list_models(provider, api_key=None, timeout=20, url=None):
     返回 (models, error)：models 是模型 id 列表，失败时是空列表 + 原因。
     面板上「拉取最新」按钮用它 —— 新模型上线不用等发版。
     """
-    if requests is None:
+    if not requests:
         return [], "requests module missing"
     url = url or _registry().get(provider, {}).get("models_url") or MODELS_URL.get(provider)
     if not url:

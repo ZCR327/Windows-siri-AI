@@ -25,8 +25,8 @@ import threading
 import time
 
 try:
-    import requests
-except Exception:      # pragma: no cover
+    from netdeps import requests
+except Exception:  # pragma: no cover
     requests = None
 
 try:
@@ -171,7 +171,7 @@ def _adm_by_level(adm, level):
 
 def _reverse_amap(lat, lon):
     key = _amap_key()
-    if not key or requests is None:
+    if not key or not requests:
         return None
     try:
         r = requests.get(
@@ -206,7 +206,7 @@ def _parse_bigdata(d):
 
 
 def _reverse_bigdata(lat, lon):
-    if requests is None:
+    if not requests:
         return None
     try:
         r = requests.get(
@@ -242,7 +242,7 @@ def _parse_photon(j):
 
 
 def _reverse_photon(lat, lon):
-    if requests is None:
+    if not requests:
         return None
     try:
         r = requests.get(
@@ -271,7 +271,7 @@ def reverse(lat, lon):
 
 def _ip_place():
     """IP 定位兜底 —— 会飘几十公里，只能当「大概在哪座城」。"""
-    if requests is None:
+    if not requests:
         return None
     try:
         r = requests.get("http://ip-api.com/json/", timeout=10)

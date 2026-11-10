@@ -2582,9 +2582,13 @@ def main():
     _mutex = None
     try:
         _k32 = ctypes.windll.kernel32
-        _mutex = _k32.CreateMutexW(None, False, "Global\\SiriOS.Singleton")
+        # ⚠️ 测试实例用环境变量换一个互斥量名：
+        #    常驻实例不动，我们并行跑一个测试实例去量启动耗时（不碰他的实例）。
+        _tag = (os.environ.get("SIRI_OS_INSTANCE_TAG") or "").strip()
+        _suffix = ("." + _tag) if _tag else ""
+        _mutex = _k32.CreateMutexW(None, False, "Global\\SiriOS.Singleton" + _suffix)
         if not _mutex:
-            _mutex = _k32.CreateMutexW(None, False, "Local\\SiriOS.Singleton")
+            _mutex = _k32.CreateMutexW(None, False, "Local\\SiriOS.Singleton" + _suffix)
         _already = (_k32.GetLastError() == 183)   # ERROR_ALREADY_EXISTS
     except Exception:
         _mutex = None
