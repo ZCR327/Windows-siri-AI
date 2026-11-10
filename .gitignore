@@ -33,3 +33,10 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ---- one-click/ 的打包载荷必须整个进仓库 ----
+# 上面 *.py[cod] / __pycache__ / *.png 这些规则是给**源码目录**用的；
+# 但 one-click/_internal/ 里装的就是这些东西（.pyd 扩展模块、Qt 插件）——
+# 漏掉的话，clone 下来的仓库是**跑不起来**的。
+# 2026-11-10 真踩过：载荷少了 52 个文件，.pyd 全被 *.py[cod] 吃掉了。
+!one-click/**
