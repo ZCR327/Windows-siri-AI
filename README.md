@@ -38,11 +38,11 @@ recording.</sub>
 
 **Requirements:** Windows 10/11, Python 3.10+, a screen with a taskbar.
 
-**Or no Python at all:** grab the prebuilt `one-click/` folder from this repository
-(`one-click/Siri-OS.exe`), copy it to a place you can write to and double-click it.
+**Or no Python at all:** grab the prebuilt `one-click/` folder from this repository,
+copy the whole folder somewhere you can write to and double-click `Siri-OS.exe`.
 It writes `config.json`, the key store and its logs next to itself.
-To build it yourself, `build_exe.py` produces the same single `Siri-OS.exe` - see
-[One file, no Python](#one-file-no-python).
+To build it yourself, `build_exe.py` produces the same folder - see
+[No Python needed](#no-python-needed).
 
 ```powershell
 pip install -r requirements.txt
@@ -314,15 +314,20 @@ Anthropic requires alternating `user` / `assistant` turns, and concatenating his
 with the current question can produce two `user` messages in a row - so the messages
 are normalised before they leave.
 
-### One file, no Python
+### No Python needed
 
-`build_exe.py` runs PyInstaller over `siri_os.spec` and produces a single
-`Siri-OS.exe` you can copy anywhere and double-click.
+`build_exe.py` runs PyInstaller over `siri_os.spec` and produces a ready-to-run
+folder: `Siri-OS.exe` plus the `_internal/` libraries it runs on.
 
 The repository ships that build in [`one-click/`](one-click/) - a ready-to-run
-folder with the exe, an English `README.txt` and the Chinese `使用说明.txt`.
-Download it, copy the folder somewhere writable, double-click. If you change the
-source, rebuild the exe and drop the new binary in there.
+folder with the program, an English `README.txt` and the Chinese `使用说明.txt`.
+Download it, copy the whole folder somewhere writable, double-click. If you
+change the source, rebuild and drop the new binaries in there.
+
+The packaging is a folder rather than one self-extracting exe on purpose: a
+single-file build has to unpack ~90 MB into `%TEMP%` on every launch, and that
+unpacking is exactly what the user waits for. Measured on the same machine, the
+folder build reaches its first frame in 0.31s instead of 2.12s.
 
 The frozen build has **two** directories, and confusing them is the classic bug: the
 unpack directory (`sys._MEIPASS`) is read-only and holds the code and `listen.ps1`;

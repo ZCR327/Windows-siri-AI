@@ -1,9 +1,10 @@
-Siri-OS - one-click build (no Python needed)
-===========================================
+Siri-OS - ready-to-run build (no Python needed)
+==============================================
 
 What is in this folder
-----------------------
-  Siri-OS.exe      the whole assistant in one file
+-----------------------
+  Siri-OS.exe      the assistant
+  _internal/       the libraries it runs on - KEEP THIS FOLDER NEXT TO THE EXE
   README.txt       this file
   使用说明.txt      the same thing in Chinese
 
@@ -11,10 +12,10 @@ How to run it
 -------------
 1. Copy this whole folder to a place you can write to
    (D:/Siri-OS/ or Documents/Siri-OS/ are fine).
-   Do not run the .exe straight out of a zip or from a read-only location.
-2. Double-click Siri-OS.exe.
-   The first start takes a second or two - a single-file exe unpacks itself
-   into a temp folder first. That is normal.
+   Do not move Siri-OS.exe out of it - it needs the _internal folder.
+   Do not run it straight out of a zip or from a read-only location.
+2. Double-click Siri-OS.exe. It starts in a fraction of a second:
+   this is a folder build, so there is nothing to unpack on every launch.
 3. Look at the tray next to the clock. A Siri glow icon means it is running.
 4. Press your laptop's voice key to wake it. On most machines the fallback
    hotkey is ctrl+alt+space - you can change it in the settings panel.

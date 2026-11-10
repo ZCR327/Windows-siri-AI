@@ -117,12 +117,16 @@ a.datas = _trim(a.datas)
 
 pyz = PYZ(a.pure)
 
+# ⚠️ **onedir（文件夹版），不是 onefile（2026-11-10 改）：
+#   onefile 每次启动都要把 89MB 解到 %TEMP% —— 实测解包就占掉 1.4~1.9s，
+#   是「双击到能用」的全部大头。onedir 直接从文件夹里跑，解包这一步整个消失：
+#   实测 A/B：2.12s -> **0.31s**（同机同口径）。
+#   代价：发布物是一个文件夹，不是「一个 exe」。
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="Siri-OS",
     debug=False,
     bootloader_ignore_signals=False,
@@ -138,3 +142,8 @@ exe = EXE(
     entitlements_file=None,
     icon=ICON if os.path.exists(ICON) else None,
 )
+
+# 一个可以直接跑的文件夹：exe + _internal/（库、插件、资源都在里面）
+coll = COLLECT(exe, a.binaries, a.datas,
+               strip=False, upx=False, upx_exclude=[],
+               name="Siri-OS")

@@ -27,7 +27,8 @@ README = """Siri-OS 桌面语音助手（Windows 免安装版）
 
 怎么用
 ------
-1. 把 Siri-OS.exe 放在一个**你自己有写权限**的目录（比如用户目录下的 `Siri-OS` 文件夹）。
+1. 把**整个文件夹**放到一个**你自己有写权限**的目录（比如用户目录下的 `Siri-OS` 文件夹）。
+   `Siri-OS.exe` 和 `_internal/` 必须待在一起（别把 exe 单独拷走）。
    同目录会自动生成：config.json（设置）、config/api_keys.json（密钥）、logs/（日志）。
 2. 双击运行。右下角托盘出现图标 = 已经在跑了。
 3. 按小米笔记本上的「小米语音助手键」唤醒（这台机器是那个键；
@@ -48,7 +49,7 @@ logs\keyhook.log    按键日志
 ---------------------------
 多半是被杀毒软件拦了（未签名的 exe 容易被误报），把它加进白名单再试。
 
-第一次启动会慢一两秒 —— 单文件 exe 要先解包到临时目录，这是正常的。
+启动很快 —— 这是文件夹版，不用每次解包到临时目录。
 """
 
 
@@ -99,21 +100,26 @@ def main():
         print("PyInstaller failed rc=%s" % r.returncode)
         return r.returncode
 
-    exe = os.path.join(DIST, "Siri-OS.exe")
+    # onedir：产物是一个文件夹（exe + _internal/），不是单个 exe
+    dist_dir = os.path.join(DIST, "Siri-OS")
+    exe = os.path.join(dist_dir, "Siri-OS.exe")
     if not os.path.exists(exe):
-        print("build finished but exe is missing: %s" % exe)
+        print("build finished but the payload is missing: %s" % exe)
         return 1
 
     if os.path.isdir(OUT_DIR):
         shutil.rmtree(OUT_DIR, ignore_errors=True)
     os.makedirs(OUT_DIR, exist_ok=True)
-    shutil.copy2(exe, os.path.join(OUT_DIR, "Siri-OS.exe"))
+    shutil.copytree(dist_dir, OUT_DIR, dirs_exist_ok=True)
     with open(os.path.join(OUT_DIR, "使用说明.txt"), "w", encoding="utf-8") as f:
         f.write(README)
 
-    mb = os.path.getsize(exe) / 1048576.0
-    print("OK: %s (%.1f MB)" % (exe, mb))
-    print("collected to: %s" % OUT_DIR)
+    total = 0
+    for dp, dn, fn in os.walk(OUT_DIR):
+        for name in fn:
+            total += os.path.getsize(os.path.join(dp, name))
+    print("OK: %s (%.1f MB)" % (exe, os.path.getsize(exe) / 1048576.0))
+    print("collected to: %s (%.1f MB in total)" % (OUT_DIR, total / 1048576.0))
     return 0
 
 
